@@ -463,7 +463,6 @@ stream_payload = dict(payload)
 stream_payload["stream"] = True
 stream_payload["stream_options"] = {"include_usage": True}
 saw_usage = False
-saw_done = False
 try:
     data = json.dumps(stream_payload).encode()
     req = urllib.request.Request(base + chat_path, data=data, headers=headers, method="POST")
@@ -474,7 +473,6 @@ try:
                 continue
             chunk = line[5:].strip()
             if chunk == "[DONE]":
-                saw_done = True
                 break
             try:
                 obj = json.loads(chunk)
@@ -491,7 +489,7 @@ except Exception as exc:
 else:
     if saw_usage:
         print("  streamed usage: present (stream_options.include_usage honored)")
-    elif saw_done:
+    else:
         print("  WARNING: streamed response completed without any 'usage' chunk.")
         print("           --use-server-token-count will not provide cost-accounting totals.")
 PY
@@ -607,6 +605,8 @@ EOF
   for arg in "${cmd[@]}"; do
     if [[ "$prev" == "--api-key" ]]; then
       printf ' %q' "REDACTED"
+    elif [[ "$arg" == --api-key=* ]]; then
+      printf ' %q' "--api-key=REDACTED"
     else
       printf ' %q' "$arg"
     fi
@@ -868,7 +868,7 @@ for profile, candidates in sorted(grouped.items()):
     )
     chosen = feasible[-1]
     max_tested = max(r["concurrency"] for r in candidates)
-    if chosen["concurrency"] == max_tested and len(candidates) > 1:
+    if chosen["concurrency"] == max_tested:
         print(
             f"NOTE: '{profile}' best point is at the max tested concurrency "
             f"({max_tested}); saturation may not be reached. "
