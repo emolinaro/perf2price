@@ -3,3 +3,5 @@ aiperf-cost-benchmark-*/
 
 # Local Python environment
 .venv/
+__pycache__/
+*.py[cod]
