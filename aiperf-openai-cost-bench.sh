@@ -196,6 +196,11 @@ while [[ $# -gt 0 ]]; do
     API_KEY="${2:?missing value for --api-key}"
     shift 2
     ;;
+  --api-key=*)
+    API_KEY="${1#--api-key=}"
+    [[ -n "$API_KEY" ]] || die "missing value for --api-key"
+    shift
+    ;;
   --concurrency)
     CONCURRENCY_LIST="${2:?missing value for --concurrency}"
     shift 2
@@ -386,6 +391,7 @@ probe_endpoint() {
   echo "Probing OpenAI-compatible endpoint: ${URL}${ENDPOINT}"
   "$PYTHON_BIN" - "$URL" "$MODELS_ENDPOINT" "$ENDPOINT" "$MODEL" "$API_KEY" "$LEGACY_MAX_TOKENS" <<'PY'
 import json
+import math
 import sys
 import urllib.error
 import urllib.request
@@ -395,6 +401,26 @@ base, models_path, chat_path, model, api_key, legacy = sys.argv[1:7]
 headers = {"Content-Type": "application/json"}
 if api_key:
     headers["Authorization"] = f"Bearer {api_key}"
+
+def redact_api_key(value):
+    text = str(value)
+    return text.replace(api_key, "REDACTED") if api_key else text
+
+def usage_token_counts(usage):
+    if not isinstance(usage, dict):
+        return None
+    prompt = usage.get("prompt_tokens", usage.get("input_tokens"))
+    completion = usage.get("completion_tokens", usage.get("output_tokens"))
+    counts = (prompt, completion)
+    if not all(
+        isinstance(count, (int, float))
+        and not isinstance(count, bool)
+        and math.isfinite(count)
+        and count >= 0
+        for count in counts
+    ):
+        return None
+    return counts
 
 def request_json(method, url, payload=None, timeout=30):
     data = None if payload is None else json.dumps(payload).encode()
@@ -407,14 +433,14 @@ try:
     ids = [x.get("id") for x in models.get("data", []) if isinstance(x, dict)]
     if ids:
         if model in ids:
-            print(f"  /models: found '{model}'")
+            print(f"  /models: found '{redact_api_key(model)}'")
         else:
-            print(f"  WARNING: '{model}' not listed by /models")
-            print("  Available model ids:", ", ".join(str(x) for x in ids[:20]))
+            print(f"  WARNING: '{redact_api_key(model)}' not listed by /models")
+            print("  Available model ids:", redact_api_key(", ".join(str(x) for x in ids[:20])))
     else:
         print("  WARNING: /models returned no model ids")
 except Exception as exc:
-    print(f"  WARNING: /models probe failed: {exc}")
+    print(f"  WARNING: /models probe failed: {redact_api_key(exc)}")
 
 payload = {
     "model": model,
@@ -429,31 +455,31 @@ else:
 try:
     response = request_json("POST", base + chat_path, payload, timeout=60)
 except urllib.error.HTTPError as exc:
-    body = exc.read().decode(errors="replace")
+    body = redact_api_key(exc.read().decode(errors="replace"))
     print(f"  ERROR: chat probe returned HTTP {exc.code}: {body[:1000]}", file=sys.stderr)
     raise SystemExit(1)
 except Exception as exc:
-    print(f"  ERROR: chat probe failed: {exc}", file=sys.stderr)
+    print(f"  ERROR: chat probe failed: {redact_api_key(exc)}", file=sys.stderr)
     raise SystemExit(1)
 
 usage = response.get("usage")
-if not usage:
-    print("  WARNING: response has no 'usage' object.")
+counts = usage_token_counts(usage)
+if counts is None:
+    print("  WARNING: response has no usable 'usage' token counts.")
     print("           --use-server-token-count will not provide cost-accounting totals.")
 else:
-    print("  usage:", json.dumps(usage, sort_keys=True))
-    prompt = usage.get("prompt_tokens", usage.get("input_tokens"))
-    completion = usage.get("completion_tokens", usage.get("output_tokens"))
+    print("  usage:", redact_api_key(json.dumps(usage, sort_keys=True)))
+    prompt, completion = counts
     cached = None
     details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
     if isinstance(details, dict):
         cached = details.get("cached_tokens")
-    print(f"  prompt/input tokens: {prompt}")
-    print(f"  completion/output tokens: {completion}")
+    print(f"  prompt/input tokens: {redact_api_key(prompt)}")
+    print(f"  completion/output tokens: {redact_api_key(completion)}")
     if cached is None:
         print("  cached tokens: not reported (cache multiplier cannot be fitted unless cache runs report them)")
     else:
-        print(f"  cached tokens: {cached}")
+        print(f"  cached tokens: {redact_api_key(cached)}")
 
 # Streaming probe: --streaming + --use-server-token-count needs usage on
 # streamed responses, which only works if the server honors
@@ -478,19 +504,19 @@ try:
                 obj = json.loads(chunk)
             except json.JSONDecodeError:
                 continue
-            if isinstance(obj, dict) and obj.get("usage"):
+            if isinstance(obj, dict) and usage_token_counts(obj.get("usage")) is not None:
                 saw_usage = True
 except urllib.error.HTTPError as exc:
-    body = exc.read().decode(errors="replace")
+    body = redact_api_key(exc.read().decode(errors="replace"))
     print(f"  WARNING: streamed probe returned HTTP {exc.code}: {body[:400]}")
     print("           The server may reject stream_options/include_usage.")
 except Exception as exc:
-    print(f"  WARNING: streamed probe failed: {exc}")
+    print(f"  WARNING: streamed probe failed: {redact_api_key(exc)}")
 else:
     if saw_usage:
         print("  streamed usage: present (stream_options.include_usage honored)")
     else:
-        print("  WARNING: streamed response completed without any 'usage' chunk.")
+        print("  WARNING: streamed response completed without usable token counts.")
         print("           --use-server-token-count will not provide cost-accounting totals.")
 PY
 }
