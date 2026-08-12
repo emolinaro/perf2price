@@ -913,7 +913,10 @@ fit_result = {
     "selection": {
         "ttft_p99_ms_max": ttft_limit or None,
         "itl_p99_ms_max": itl_limit or None,
-        "rule": "highest request throughput per workload satisfying enabled SLOs",
+        "rule": (
+            "highest request throughput per workload among error-free, "
+            "API-usage-valid runs satisfying enabled SLOs"
+        ),
         "selected_profiles": [
             {"profile": r["profile"], "concurrency": r["concurrency"]}
             for r in selected
