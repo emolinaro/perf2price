@@ -5,3 +5,7 @@ perf2price-run-*/
 .venv/
 __pycache__/
 *.py[cod]
+
+# Local test files
+tests/
+.pytest_cache/
