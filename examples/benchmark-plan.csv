@@ -1,0 +1,10 @@
+name,isl,osl,prefix_tokens
+prefill_1k,1024,64,0
+prefill_4k,4096,64,0
+prefill_16k,16384,64,0
+decode_512,512,512,0
+decode_2k,512,2048,0
+mixed_4k,4096,512,0
+mixed_8k,8192,1024,0
+cache_4k,512,256,4096
+cache_8k,512,256,8192
