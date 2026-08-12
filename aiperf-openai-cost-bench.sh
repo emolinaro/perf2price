@@ -276,12 +276,6 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "Python not found: $PYTHON_BIN"
 
 mkdir -p "$OUT_DIR"
 
-if [[ -n "$TOKENIZER_REVISION" ]]; then
-  TOKENIZER_REVISION_JSON="\"$TOKENIZER_REVISION\""
-else
-  TOKENIZER_REVISION_JSON=null
-fi
-
 echo "Tokenizer used by AIPerf: $TOKENIZER"
 if [[ "$TOKENIZER" = "builtin" ]]; then
   echo "WARNING: using AIPerf's generic builtin tokenizer; prefer the model-specific tokenizer for precise ISL calibration." >&2
@@ -289,9 +283,10 @@ fi
 
 # Validate numeric-ish arguments early.
 "$PYTHON_BIN" - "$DURATION" "$GRACE_PERIOD" "$MAX_CONTEXT" \
-  "$TTFT_P99_MS" "$ITL_P99_MS" "${RESOURCE_HOUR_COST:-}" <<'PY'
+  "$TTFT_P99_MS" "$ITL_P99_MS" "${RESOURCE_HOUR_COST:-}" \
+  "$RANDOM_SEED" "$NUM_DATASET_ENTRIES" <<'PY'
 import sys
-duration, grace, max_context, ttft, itl, hourly = sys.argv[1:]
+duration, grace, max_context, ttft, itl, hourly, seed, entries = sys.argv[1:]
 if float(duration) <= 0:
     raise SystemExit("--duration must be > 0")
 if grace != "inf" and float(grace) < 0:
@@ -302,6 +297,10 @@ if float(ttft) < 0 or float(itl) < 0:
     raise SystemExit("SLO values must be >= 0")
 if hourly and float(hourly) <= 0:
     raise SystemExit("--resource-hour-cost must be > 0")
+if int(seed) < 0:
+    raise SystemExit("--random-seed must be a non-negative integer")
+if int(entries) <= 0:
+    raise SystemExit("--num-dataset-entries must be a positive integer")
 PY
 
 # Default workload plan.
@@ -344,24 +343,44 @@ PY
 
 export AIPERF_HTTP_CONNECTION_LIMIT="${AIPERF_HTTP_CONNECTION_LIMIT:-$((MAX_CONCURRENCY + 64))}"
 
-cat >"${OUT_DIR}/run_config.json" <<EOF
-{
-  "url": "$URL",
-  "endpoint": "$ENDPOINT",
-  "models_endpoint": "$MODELS_ENDPOINT",
-  "model": "$MODEL",
-  "tokenizer": "$TOKENIZER",
-  "tokenizer_revision": $TOKENIZER_REVISION_JSON,
-  "concurrency_list": "$CONCURRENCY_LIST",
-  "duration_seconds": $DURATION,
-  "grace_period": "$GRACE_PERIOD",
-  "ttft_p99_ms": $TTFT_P99_MS,
-  "itl_p99_ms": $ITL_P99_MS,
-  "resource_hour_cost_usd": ${RESOURCE_HOUR_COST:-null},
-  "random_seed": $RANDOM_SEED,
-  "num_dataset_entries": $NUM_DATASET_ENTRIES
+# Write run_config.json via Python so values are properly JSON-escaped
+# (MODEL/URL may contain characters that would corrupt a raw heredoc).
+"$PYTHON_BIN" - "${OUT_DIR}/run_config.json" \
+  "$URL" "$ENDPOINT" "$MODELS_ENDPOINT" "$MODEL" "$TOKENIZER" \
+  "$TOKENIZER_REVISION" "$CONCURRENCY_LIST" "$DURATION" "$GRACE_PERIOD" \
+  "$TTFT_P99_MS" "$ITL_P99_MS" "${RESOURCE_HOUR_COST:-}" \
+  "$RANDOM_SEED" "$NUM_DATASET_ENTRIES" <<'PY'
+import json
+import sys
+
+(path, url, endpoint, models_endpoint, model, tokenizer, revision,
+ concurrency_list, duration, grace, ttft, itl, hourly_cost,
+ seed, entries) = sys.argv[1:16]
+
+def num(v):
+    n = float(v)
+    return int(n) if n == int(n) else n
+
+config = {
+    "url": url,
+    "endpoint": endpoint,
+    "models_endpoint": models_endpoint,
+    "model": model,
+    "tokenizer": tokenizer,
+    "tokenizer_revision": revision or None,
+    "concurrency_list": concurrency_list,
+    "duration_seconds": num(duration),
+    "grace_period": grace,
+    "ttft_p99_ms": num(ttft),
+    "itl_p99_ms": num(itl),
+    "resource_hour_cost_usd": num(hourly_cost) if hourly_cost else None,
+    "random_seed": int(seed),
+    "num_dataset_entries": int(entries),
 }
-EOF
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(config, f, indent=2)
+    f.write("\n")
+PY
 
 probe_endpoint() {
   echo "Probing OpenAI-compatible endpoint: ${URL}${ENDPOINT}"
@@ -435,6 +454,46 @@ else:
         print("  cached tokens: not reported (cache multiplier cannot be fitted unless cache runs report them)")
     else:
         print(f"  cached tokens: {cached}")
+
+# Streaming probe: --streaming + --use-server-token-count needs usage on
+# streamed responses, which only works if the server honors
+# stream_options: {"include_usage": true}. The non-streaming probe above
+# cannot detect a missing include_usage implementation.
+stream_payload = dict(payload)
+stream_payload["stream"] = True
+stream_payload["stream_options"] = {"include_usage": True}
+saw_usage = False
+saw_done = False
+try:
+    data = json.dumps(stream_payload).encode()
+    req = urllib.request.Request(base + chat_path, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=60) as r:
+        for raw in r:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            chunk = line[5:].strip()
+            if chunk == "[DONE]":
+                saw_done = True
+                break
+            try:
+                obj = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and obj.get("usage"):
+                saw_usage = True
+except urllib.error.HTTPError as exc:
+    body = exc.read().decode(errors="replace")
+    print(f"  WARNING: streamed probe returned HTTP {exc.code}: {body[:400]}")
+    print("           The server may reject stream_options/include_usage.")
+except Exception as exc:
+    print(f"  WARNING: streamed probe failed: {exc}")
+else:
+    if saw_usage:
+        print("  streamed usage: present (stream_options.include_usage honored)")
+    elif saw_done:
+        print("  WARNING: streamed response completed without any 'usage' chunk.")
+        print("           --use-server-token-count will not provide cost-accounting totals.")
 PY
 }
 
@@ -442,7 +501,16 @@ if [[ "$SKIP_PROBE" -eq 0 ]]; then
   probe_endpoint
 fi
 
-IFS=',' read -r -a CONCURRENCIES <<<"$CONCURRENCY_LIST"
+# Split and normalize the concurrency list (trims spaces, drops empty
+# entries so "4, 8,,16" does not produce garbage levels or empty dirs).
+IFS=',' read -r -a CONCURRENCIES_RAW <<<"$CONCURRENCY_LIST"
+CONCURRENCIES=()
+for c in "${CONCURRENCIES_RAW[@]}"; do
+  c="${c//[[:space:]]/}"
+  if [[ -n "$c" ]]; then
+    CONCURRENCIES+=("$c")
+  fi
+done
 
 run_one() {
   local name="$1"
@@ -531,8 +599,19 @@ EOF
   echo
   echo "======================================================================"
   echo "Profile=$name ISL=$isl OSL=$osl prefix=$prefix concurrency=$concurrency"
+  # Print the command for reproducibility, but redact the API key value so
+  # secrets do not end up in terminal scrollback or captured logs.
   printf 'Command:'
-  printf ' %q' "${cmd[@]}"
+  local prev=""
+  local arg
+  for arg in "${cmd[@]}"; do
+    if [[ "$prev" == "--api-key" ]]; then
+      printf ' %q' "REDACTED"
+    else
+      printf ' %q' "$arg"
+    fi
+    prev="$arg"
+  done
   printf '\n'
   echo "======================================================================"
 
@@ -544,16 +623,20 @@ echo "Benchmark plan: $DEFAULT_PLAN"
 cat "$DEFAULT_PLAN"
 echo
 
-while IFS=',' read -r name isl osl prefix; do
-  # Skip header and empty/comment lines.
-  [[ "$name" == "name" ]] && continue
-  [[ -z "$name" ]] && continue
-  [[ "${name:0:1}" == "#" ]] && continue
-
+# The final '|| [[ -n "$name" ]]' keeps a last row without a trailing
+# newline from being silently dropped.
+while IFS=',' read -r name isl osl prefix || [[ -n "$name" ]]; do
+  # Strip whitespace first so " name, ..." or indented rows still match
+  # the header/comment guards below.
   name="${name//[[:space:]]/}"
   isl="${isl//[[:space:]]/}"
   osl="${osl//[[:space:]]/}"
   prefix="${prefix//[[:space:]]/}"
+
+  # Skip header and empty/comment lines.
+  [[ "$name" == "name" ]] && continue
+  [[ -z "$name" ]] && continue
+  [[ "${name:0:1}" == "#" ]] && continue
 
   [[ "$isl" =~ ^[0-9]+$ ]] || die "invalid ISL for '$name': $isl"
   [[ "$osl" =~ ^[0-9]+$ ]] || die "invalid OSL for '$name': $osl"
@@ -604,6 +687,27 @@ def scalar_metric(data, name, stat="avg"):
             return None
         if isinstance(v, (int, float)):
             return float(v)
+    return None
+
+def extract_error_count(data):
+    """Number of errored requests in a run.
+
+    AIPerf 0.12 exports an ``error_summary`` array instead of an
+    ``error_request_count`` metric, so derive the count from there and fall
+    back to the metric name in case future versions add it.
+    """
+    v = scalar_metric(data, "error_request_count")
+    if v is not None:
+        return v
+    summary = data.get("error_summary")
+    if isinstance(summary, list):
+        total = 0
+        for entry in summary:
+            if isinstance(entry, dict) and isinstance(entry.get("count"), (int, float)):
+                total += entry["count"]
+            else:
+                total += 1
+        return float(total)
     return None
 
 def load_summary(run_dir):
@@ -676,7 +780,7 @@ for ctx_path in sorted(root.glob("runs/*/c*/run_context.json")):
         "itl_p99_ms": scalar_metric(data, "inter_token_latency", "p99"),
         "request_latency_p99_ms": scalar_metric(data, "request_latency", "p99"),
         "request_count": scalar_metric(data, "request_count"),
-        "error_request_count": scalar_metric(data, "error_request_count"),
+        "error_request_count": extract_error_count(data),
     }
 
     if duration and usage_ok and duration > 0:
@@ -739,9 +843,22 @@ for r in rows:
 
 selected = []
 for profile, candidates in sorted(grouped.items()):
-    feasible = [r for r in candidates if meets_slo(r)]
+    # Runs containing errored requests have distorted usage totals: the API
+    # still counts tokens up to the failure point while latency/throughput
+    # reflects truncated work. Exclude them from capacity selection.
+    errored = [r for r in candidates if (r.get("error_request_count") or 0) > 0]
+    if errored:
+        print(
+            f"WARNING: '{profile}': excluding {len(errored)} run(s) with "
+            "errored requests from capacity selection",
+            file=sys.stderr,
+        )
+    feasible = [
+        r for r in candidates
+        if (r.get("error_request_count") or 0) == 0 and meets_slo(r)
+    ]
     if not feasible:
-        print(f"WARNING: no SLO-feasible/API-usage-valid run for profile '{profile}'", file=sys.stderr)
+        print(f"WARNING: no error-free/SLO-feasible/API-usage-valid run for profile '{profile}'", file=sys.stderr)
         continue
     feasible.sort(
         key=lambda r: (
@@ -749,7 +866,17 @@ for profile, candidates in sorted(grouped.items()):
             r["concurrency"],
         )
     )
-    selected.append(feasible[-1])
+    chosen = feasible[-1]
+    max_tested = max(r["concurrency"] for r in candidates)
+    if chosen["concurrency"] == max_tested and len(candidates) > 1:
+        print(
+            f"NOTE: '{profile}' best point is at the max tested concurrency "
+            f"({max_tested}); saturation may not be reached. "
+            "Consider extending --concurrency upward.",
+            file=sys.stderr,
+        )
+        chosen["selection_note"] = "at_sweep_edge"
+    selected.append(chosen)
 
 write_csv(root / "selected_capacity_points.csv", selected)
 
