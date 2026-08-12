@@ -9,7 +9,8 @@ set -euo pipefail
 #   3. Uses API-reported usage token counts (--use-server-token-count).
 #   4. Sweeps concurrency at each workload.
 #   5. Parses AIPerf summary JSON into summary.csv.
-#   6. Selects the highest-throughput concurrency per workload, optionally under SLOs.
+#   6. Selects the highest-throughput error-free, usage-valid concurrency per
+#      workload, optionally under SLOs.
 #   7. Fits:
 #
 #        resource_seconds ~= a * non_cached_input_tokens
@@ -861,8 +862,9 @@ def meets_slo(r):
     return True
 
 # Pick the highest request-throughput concurrency within each workload profile
-# that satisfies the requested SLOs. Because request size is fixed within a
-# profile, request throughput is a clean capacity comparator inside that group.
+# among error-free runs with valid usage that satisfy the requested SLOs.
+# Because request size is fixed within a profile, request throughput is a clean
+# capacity comparator inside that group.
 grouped = defaultdict(list)
 for r in rows:
     grouped[r["profile"]].append(r)

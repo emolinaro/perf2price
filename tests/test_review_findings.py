@@ -60,8 +60,7 @@ class PythonBridge(BaseHTTPRequestHandler):
                 sys.stdout = original_stdout
                 sys.stderr = original_stderr
         body = (
-            f"{exit_code}\n{stdout.getvalue()}{stderr.getvalue()}"
-            "__PYTHON_BRIDGE_END__"
+            f"{exit_code}\n{stdout.getvalue()}{stderr.getvalue()}__PYTHON_BRIDGE_END__"
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
@@ -102,8 +101,7 @@ class OpenAIStub(BaseHTTPRequestHandler):
                 body = b'data: {"choices": [{"delta": {"content": "OK"}}]}\n\n'
             else:
                 body = (
-                    f"data: {json.dumps({'usage': usage})}\n\n"
-                    "data: [DONE]\n\n"
+                    f"data: {json.dumps({'usage': usage})}\n\ndata: [DONE]\n\n"
                 ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")

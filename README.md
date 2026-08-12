@@ -748,6 +748,12 @@ export OPENAI_API_KEY=...
   --duration 300
 ```
 
+## Endpoint capability probe
+
+Before starting the benchmark matrix, the harness probes the models endpoint and sends both non-streaming and streaming chat requests. The endpoint must report usable input and output token counts for streamed responses when asked with `stream_options.include_usage`; otherwise the probe warns that server-side cost-accounting totals will be unavailable. A failed non-streaming chat probe stops the run.
+
+The displayed AIPerf command and probe diagnostics redact the supplied API key value. Use `--skip-probe` only when the endpoint has already been checked for these capabilities.
+
 ---
 
 # 9. Default benchmark plan
@@ -822,10 +828,13 @@ Contains all workload/concurrency measurements, including:
 - TTFT
 - ITL
 - benchmark duration
+- request and errored-request counts
 
 ## `selected_capacity_points.csv`
 
-Contains the selected concurrency point for each workload profile.
+Contains the highest-request-throughput, error-free concurrency point for each workload profile among runs with usable server token counts that satisfy the enabled TTFT and ITL SLOs. Runs containing errored requests are excluded from selection.
+
+If a selected point is at the largest tested concurrency, the harness warns that saturation may not have been reached and recommends extending the concurrency sweep.
 
 ## `pricing_fit.json`
 
@@ -1229,4 +1238,3 @@ $$
 $$
 P_C = c\frac{H}{3600}
 $$
-
