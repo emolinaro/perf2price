@@ -14,7 +14,7 @@ from urllib.parse import parse_qs
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "aiperf-openai-cost-bench.sh"
+SCRIPT = ROOT / "perf2price.sh"
 
 
 class PythonBridge(BaseHTTPRequestHandler):

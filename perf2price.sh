@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Backend-agnostic AIPerf harness for OpenAI-compatible chat/completions endpoints.
+# perf2price - Backend-agnostic AIPerf harness for OpenAI-compatible
+# chat/completions endpoints. Sweeps load, fits a per-token resource-cost
+# model, and converts it to $/M-token prices for the serving allocation.
 #
 # It:
 #   1. Probes the OpenAI-compatible endpoint.
@@ -47,7 +49,7 @@ DURATION="120"
 GRACE_PERIOD="120"
 RANDOM_SEED="100"
 NUM_DATASET_ENTRIES="12800"
-OUT_DIR="./aiperf-cost-benchmark-$(date +%Y%m%d-%H%M%S)"
+OUT_DIR="./perf2price-run-$(date +%Y%m%d-%H%M%S)"
 PLAN_FILE=""
 MAX_CONTEXT="0"
 
@@ -68,7 +70,7 @@ EXTRA_AIPERF_ARGS=()
 usage() {
   cat <<'EOF'
 Usage:
-  aiperf-openai-cost-bench.sh --url URL --model MODEL [options]
+  perf2price.sh --url URL --model MODEL [options]
 
 Required:
   --url URL                  OpenAI-compatible base URL, e.g. http://localhost:8000
@@ -130,13 +132,13 @@ Everything after "--" is appended verbatim to every "aiperf profile" call.
 Examples:
 
   # Local model
-  ./aiperf-openai-cost-bench.sh \
+  ./perf2price.sh \
     --url http://localhost:8000 \
     --model Qwen/Qwen3-30B-A3B \
     --concurrency 1,2,4,8,16
 
   # Remote/Kubernetes endpoint reachable from this machine
-  ./aiperf-openai-cost-bench.sh \
+  ./perf2price.sh \
     --url https://llm.example.org \
     --model openai/gpt-oss-120b \
     --tokenizer openai/gpt-oss-120b \
@@ -146,7 +148,7 @@ Examples:
     --resource-hour-cost 15.96
 
   # Custom AIPerf switches
-  ./aiperf-openai-cost-bench.sh \
+  ./perf2price.sh \
     --url http://localhost:8000 \
     --model my-model \
     -- \

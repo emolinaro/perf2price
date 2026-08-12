@@ -1,4 +1,4 @@
-# AIPerf OpenAI Cost Benchmark
+# perf2price - AIPerf OpenAI Cost Benchmark
 
 A reusable, backend-independent benchmark harness for LLMs exposed through an **OpenAI-compatible Chat Completions API**.
 
@@ -29,10 +29,11 @@ If you also provide the hourly cost of the complete serving allocation, the harn
 ## Contents
 
 ```text
-aiperf-openai-cost-bench/
+perf2price/
 ├── README.md
 ├── requirements.txt
-├── aiperf-openai-cost-bench.sh
+├── perf2price.sh
+├── tests/
 └── examples/
     └── benchmark-plan.csv
 ```
@@ -658,7 +659,7 @@ The safest rule is:
 ### Same model ID on server and Hugging Face
 
 ```bash
-./aiperf-openai-cost-bench.sh \
+./perf2price.sh \
   --url http://localhost:8000 \
   --model openai/gpt-oss-120b
 ```
@@ -668,7 +669,7 @@ The script defaults `--tokenizer` to `--model`.
 ### Server uses an alias
 
 ```bash
-./aiperf-openai-cost-bench.sh \
+./perf2price.sh \
   --url http://localhost:8000 \
   --model gpt-oss-prod \
   --tokenizer openai/gpt-oss-120b
@@ -679,7 +680,7 @@ The script defaults `--tokenizer` to `--model`.
 Kimi K3 currently requires custom tokenizer code when loaded through Hugging Face. Use:
 
 ```bash
-./aiperf-openai-cost-bench.sh \
+./perf2price.sh \
   --url http://localhost:8000 \
   --model moonshotai/Kimi-K3 \
   --tokenizer moonshotai/Kimi-K3 \
@@ -708,7 +709,7 @@ Use `builtin` mainly for smoke tests. For cost calibration, prefer the model-spe
 ## Local endpoint
 
 ```bash
-./aiperf-openai-cost-bench.sh \
+./perf2price.sh \
   --url http://localhost:8000 \
   --model Qwen/Qwen3-30B-A3B \
   --concurrency 1,2,4,8,16,32 \
@@ -728,7 +729,7 @@ kubectl -n dynamo-system port-forward \
 Then run exactly the same benchmark:
 
 ```bash
-./aiperf-openai-cost-bench.sh \
+./perf2price.sh \
   --url http://localhost:8000 \
   --model openai/gpt-oss-120b \
   --duration 300
@@ -741,7 +742,7 @@ The benchmark does not need to know that Kubernetes or Dynamo is involved.
 ```bash
 export OPENAI_API_KEY=...
 
-./aiperf-openai-cost-bench.sh \
+./perf2price.sh \
   --url https://llm.example.org \
   --model my-model \
   --tokenizer org/model-repository \
@@ -798,7 +799,7 @@ where:
 Each benchmark creates a directory similar to:
 
 ```text
-aiperf-cost-benchmark-YYYYMMDD-HHMMSS/
+perf2price-run-YYYYMMDD-HHMMSS/
 ├── benchmark_plan.csv
 ├── run_config.json
 ├── runs/
@@ -882,7 +883,7 @@ The benchmark uses the actual `usage.completion_tokens` value returned by the se
 For controlled experiments on a backend that supports it, you can append backend-specific AIPerf request fields after `--`, for example:
 
 ```bash
-./aiperf-openai-cost-bench.sh \
+./perf2price.sh \
   ... \
   -- \
   --extra-inputs ignore_eos:true
