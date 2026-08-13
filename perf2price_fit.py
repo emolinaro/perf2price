@@ -583,7 +583,7 @@ def main(argv):
             ],
         },
         "resource_seconds_definition": (
-            "requested_duration + 0.5 * max(0, benchmark_duration - requested_duration)"
+            "benchmark_duration - 0.5 * max(0, benchmark_duration - requested_duration)"
         ),
         "notes": [
             "completion_tokens already includes provider-billed completion/reasoning tokens in OpenAI-style usage; reasoning_tokens is recorded only as a diagnostic and is not added again.",
