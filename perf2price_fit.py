@@ -142,6 +142,18 @@ def extract_error_count(data):
     return None
 
 
+def _read_summary(path):
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        print(f"WARNING: cannot read AIPerf summary JSON {path}: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(data, dict):
+        print(f"WARNING: AIPerf summary JSON is not an object: {path}", file=sys.stderr)
+        return None
+    return data
+
+
 def load_summary(run_dir):
     candidates = [
         run_dir / "profile_export_aiperf.json",
@@ -149,15 +161,21 @@ def load_summary(run_dir):
     ]
     for p in candidates:
         if p.exists():
-            return p, json.loads(p.read_text())
+            data = _read_summary(p)
+            if data is not None:
+                return p, data
     for p in sorted(run_dir.glob("*.json")):
-        if p.name in {"run_context.json"} or "timeslice" in p.name or "server_metrics" in p.name:
+        if (
+            p in candidates
+            or p.name == "run_context.json"
+            or "timeslice" in p.name
+            or "server_metrics" in p.name
+        ):
             continue
-        try:
-            data = json.loads(p.read_text())
-        except Exception:
+        data = _read_summary(p)
+        if data is None:
             continue
-        if isinstance(data, dict) and (
+        if (
             "benchmark_duration" in data
             or "total_usage_prompt_tokens" in data
             or "request_throughput" in data
@@ -217,16 +235,23 @@ def parse_rows(root):
         cached_raw = total_metric(data, "total_usage_prompt_cache_read_tokens")
         cache_reported = cached_raw is not None
         cached = cached_raw if cached_raw is not None else 0.0
-        if prompt is not None and cache_reported and cached > prompt:
+        if finite(prompt) and finite(cached) and cache_reported and cached > prompt:
             print(
                 f"WARNING: {ctx_path.parent}: cached_tokens ({cached}) > prompt_tokens "
-                f"({prompt}); clamping cached to prompt",
+                f"({prompt}); marking usage invalid",
                 file=sys.stderr,
             )
-            cached = prompt
 
-        usage_ok = prompt is not None and completion is not None
-        noncached = max(0.0, prompt - cached) if prompt is not None else None
+        usage_ok = (
+            finite(prompt)
+            and prompt >= 0
+            and finite(completion)
+            and completion >= 0
+            and finite(cached)
+            and cached >= 0
+            and cached <= prompt
+        )
+        noncached = prompt - cached if finite(prompt) and finite(cached) else None
 
         duration = total_metric(data, "benchmark_duration", prefer_sum=False)
         req_tput = total_metric(data, "request_throughput", prefer_sum=False)
@@ -335,12 +360,17 @@ def select_capacity_points(rows, ttft_limit, itl_limit):
                 "errored requests from capacity selection",
                 file=sys.stderr,
             )
-        feasible = [
+        usable = [
             r
             for r in candidates
             if r.get("aiperf_ok") is not False
             and (r.get("error_request_count") or 0) == 0
-            and meets_slo(r, ttft_limit, itl_limit)
+            and r["usage_ok"]
+        ]
+        feasible = [
+            r
+            for r in usable
+            if meets_slo(r, ttft_limit, itl_limit)
         ]
         if not feasible:
             print(
@@ -355,7 +385,7 @@ def select_capacity_points(rows, ttft_limit, itl_limit):
             )
         )
         chosen = dict(feasible[-1])
-        plateau, note = annotate_plateau(candidates, chosen, ttft_limit, itl_limit)
+        plateau, note = annotate_plateau(usable, chosen, ttft_limit, itl_limit)
         chosen["plateau_reached"] = int(plateau)
         if note:
             chosen["selection_note"] = note
@@ -410,6 +440,8 @@ def nnls_enumerate(X, y):
     y_rate = np.ones(len(y))
     best = None
     p = X_rate.shape[1]
+    if np.linalg.matrix_rank(X_rate) < p:
+        return None
     for mask in range(1, 1 << p):
         cols = [i for i in range(p) if mask & (1 << i)]
         beta_sub, *_ = np.linalg.lstsq(X_rate[:, cols], y_rate, rcond=None)

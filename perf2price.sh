@@ -362,7 +362,25 @@ export AIPERF_HTTP_CONNECTION_LIMIT="${AIPERF_HTTP_CONNECTION_LIMIT:-$((MAX_CONC
 # (MODEL/URL may contain characters that would corrupt a raw heredoc).
 EXTRA_JSON='[]'
 if [[ ${#EXTRA_AIPERF_ARGS[@]} -gt 0 ]]; then
-  EXTRA_JSON="$("$PYTHON_BIN" -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${EXTRA_AIPERF_ARGS[@]}")"
+  EXTRA_JSON="$("$PYTHON_BIN" -c '
+import json
+import sys
+
+redacted = []
+redact_next = False
+for arg in sys.argv[1:]:
+    if redact_next:
+        redacted.append("REDACTED")
+        redact_next = False
+    elif arg == "--api-key":
+        redacted.append(arg)
+        redact_next = True
+    elif arg.startswith("--api-key="):
+        redacted.append("--api-key=REDACTED")
+    else:
+        redacted.append(arg)
+print(json.dumps(redacted))
+' "${EXTRA_AIPERF_ARGS[@]}")"
 fi
 "$PYTHON_BIN" - "${OUT_DIR}/run_config.json" \
   "$URL" "$ENDPOINT" "$MODELS_ENDPOINT" "$MODEL" "$TOKENIZER" \
