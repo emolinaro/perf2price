@@ -33,7 +33,6 @@ perf2price/
 ├── README.md
 ├── requirements.txt
 ├── perf2price.sh
-├── tests/
 └── examples/
     └── benchmark-plan.csv
 ```
@@ -375,7 +374,7 @@ No single set of coefficients will satisfy every equation exactly because real s
 The harness therefore finds the non-negative coefficients that minimize the total squared prediction error:
 
 $$
-\underset{a,b,c \ge 0}{\operatorname{argmin}}
+\underset{a,b,c \ge 0}{\mathrm{arg\,min}}
 \sum_{j=1}^{n}
 \left[
 T_j - \left(aI_j + bO_j + cC_j\right)
