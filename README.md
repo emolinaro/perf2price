@@ -33,6 +33,7 @@ perf2price/
 ├── README.md
 ├── requirements.txt
 ├── perf2price.sh
+├── perf2price_fit.py
 └── examples/
     └── benchmark-plan.csv
 ```
@@ -45,12 +46,16 @@ The benchmark starts from quantities that are directly measured during an AIPerf
 
 For each selected benchmark run, the harness records:
 
-- `T` = benchmark duration reported by AIPerf, in seconds
+- `T` = drain-adjusted resource seconds (the requested profiling window, plus half of any grace-period tail reported by AIPerf)
 - `I` = non-cached input tokens reported by the OpenAI-compatible API
 - `O` = output tokens reported by the OpenAI-compatible API
 - `C` = cached input tokens reported by the OpenAI-compatible API, when available
 
-The key point is that **time is the primary resource quantity**.
+The key point is that **time is the primary resource quantity**. AIPerf's raw `benchmark_duration` is last-response minus first-request, so it includes the cooldown after `--benchmark-duration` while in-flight requests drain. Decode-heavy runs have longer tails. The harness therefore uses:
+
+$$
+T = T_{\text{requested}} + \tfrac{1}{2}\max(0, T_{\text{measured}} - T_{\text{requested}})
+$$
 
 The benchmark does **not** need a monetary cost to determine the relative cost of input, output, and cached tokens.
 
@@ -218,7 +223,7 @@ $$
 T_j
 $$
 
-The harness does not need to assume that every run lasts exactly the requested duration. It uses the actual duration recorded by AIPerf.
+The harness does not assume that every run lasts exactly the requested duration. It starts from the actual duration recorded by AIPerf, then converts that span into drain-adjusted resource seconds `T` so a long decode cooldown is not treated as fully busy time.
 
 For example, a run might produce:
 
@@ -236,7 +241,7 @@ $$
 31.2a + 1.8b + 0c \approx 301.4
 $$
 
-where the coefficients are measured in seconds per million tokens.
+where the coefficients are measured in **seconds per token**. Seconds per million tokens are `a × 10^6`, and so on.
 
 Another decode-heavy run might produce:
 
@@ -371,19 +376,19 @@ No single set of coefficients will satisfy every equation exactly because real s
 - KV-cache pressure
 - measurement noise
 
-The harness therefore finds the non-negative coefficients that minimize the total squared prediction error:
+The harness therefore finds the non-negative coefficients that minimize the equal-weight rate-space error:
 
 $$
 \underset{a,b,c \ge 0}{\mathrm{arg\,min}}
 \sum_{j=1}^{n}
 \left[
-T_j - \left(aI_j + bO_j + cC_j\right)
+1 - \left(a\frac{I_j}{T_j} + b\frac{O_j}{T_j} + c\frac{C_j}{T_j}\right)
 \right]^2
 $$
 
-This is a non-negative least-squares regression.
+This is a non-negative least-squares regression in which each selected workload votes equally, rather than letting a 16k-token run dominate a 1k-token run.
 
-The regression chooses `a`, `b`, and `c` so that the predicted durations are as close as possible to the durations actually measured by AIPerf.
+The regression chooses `a`, `b`, and `c` so that the predicted resource seconds are as close as possible to the drain-adjusted durations. Cache-plan rows are used only when the endpoint reports cached tokens; otherwise they are excluded so unreported cache hits cannot pull the input coefficient down. Rows whose actual completions are less than half the requested OSL are also excluded from the fit.
 
 ### Why the workloads are different
 
@@ -454,18 +459,18 @@ $$
 P_C = c \frac{H}{3600}
 $$
 
-If the coefficients are expressed per million tokens, then the resulting prices are directly in cost units per million tokens:
+If the coefficients are expressed per token, then the prices per million tokens are:
 
 $$
-P_{I,M} = a \frac{H}{3600}
-$$
-
-$$
-P_{O,M} = b \frac{H}{3600}
+P_{I,M} = a \frac{H}{3600} \times 10^6
 $$
 
 $$
-P_{C,M} = c \frac{H}{3600}
+P_{O,M} = b \frac{H}{3600} \times 10^6
+$$
+
+$$
+P_{C,M} = c \frac{H}{3600} \times 10^6
 $$
 
 The same result can also be calculated from weighted capacity.
@@ -752,9 +757,9 @@ export OPENAI_API_KEY=...
 
 ## Endpoint capability probe
 
-Before starting the benchmark matrix, the harness probes the models endpoint and sends both non-streaming and streaming chat requests. The endpoint must report usable input and output token counts for streamed responses when asked with `stream_options.include_usage`; otherwise the probe warns that server-side cost-accounting totals will be unavailable. A failed non-streaming chat probe stops the run.
+Before starting the benchmark matrix, the harness probes the models endpoint and sends both non-streaming and streaming chat requests. The endpoint must report usable input and output token counts for streamed responses when asked with `stream_options.include_usage`. A failed non-streaming chat probe stops the run. A streamed response that completes without usable token counts also stops the run, because the matrix uses `--streaming` with `--use-server-token-count`. The displayed AIPerf command and probe diagnostics redact the supplied API key value. Use `--skip-probe` only when the endpoint has already been checked for these capabilities.
 
-The displayed AIPerf command and probe diagnostics redact the supplied API key value. Use `--skip-probe` only when the endpoint has already been checked for these capabilities.
+A failed AIPerf concurrency point is recorded and skipped; the remaining summaries are still parsed and fitted.
 
 ---
 
@@ -829,18 +834,22 @@ Contains all workload/concurrency measurements, including:
 - output-token throughput
 - TTFT
 - ITL
-- benchmark duration
+- requested duration, AIPerf benchmark duration, and drain-adjusted resource seconds
+- actual output tokens per request versus requested OSL
 - request and errored-request counts
+- AIPerf exit status
 
 ## `selected_capacity_points.csv`
 
 Contains the highest-request-throughput, error-free concurrency point for each workload profile among runs with usable server token counts that satisfy the enabled TTFT and ITL SLOs. Runs containing errored requests are excluded from selection.
 
-If a selected point is at the largest tested concurrency, the harness warns that saturation may not have been reached and recommends extending the concurrency sweep.
+The file also records whether the concurrency curve looks saturated (`plateau_reached`), a `selection_note` such as `at_sweep_edge` or `slo_capped`, and whether the point is eligible for the coefficient fit. Cache-plan rows without reported cache hits, and rows whose actual OSL is less than half the requested OSL, are kept as capacity points but excluded from the regression.
+
+If a selected point is at the largest tested concurrency and throughput is still rising, the harness warns that saturation may not have been reached and recommends extending the concurrency sweep.
 
 ## `pricing_fit.json`
 
-Contains the fitted time coefficients, normalized multipliers, weighted serving capacity, fit quality, and optional cost-units/MTok values when `--resource-hour-cost` was supplied.
+Contains the fitted time coefficients (seconds per token and seconds per million tokens), normalized multipliers with bootstrap 95% confidence intervals, weighted serving capacity (`3600 / a / 10^6` input-equivalent MTok per hour), per-row regression equations and residuals, fit quality (relative RMSE, rate RMSE, condition number), and optional cost-units/MTok values when `--resource-hour-cost` was supplied.
 
 ---
 
@@ -879,7 +888,7 @@ For portability, the benchmark does not assume backend-specific parameters such 
 
 Therefore an OSL of 2048 means a maximum requested output length. The model may naturally stop sooner.
 
-The benchmark uses the actual `usage.completion_tokens` value returned by the server.
+The benchmark uses the actual `usage.completion_tokens` value returned by the server. If actual completions per request are less than half the requested OSL, that workload is kept as a capacity point but excluded from the coefficient fit so a short-decode run cannot masquerade as a decode-heavy observation.
 
 For controlled experiments on a backend that supports it, you can append backend-specific AIPerf request fields after `--`, for example:
 
@@ -906,7 +915,7 @@ For cache fitting, the endpoint must return something equivalent to:
 }
 ```
 
-If it does not, the cache coefficient cannot be derived from the OpenAI API alone.
+If it does not, the cache coefficient cannot be derived from the OpenAI API alone. Cache-plan rows without reported cache hits are excluded from the regression so those tokens are not treated as expensive non-cached input.
 
 ## This is a cost-recovery model
 
@@ -952,7 +961,7 @@ This produces a much more defensible comparison than copying public API pricing 
 
 # 14. Improvements to consider
 
-The current harness is intentionally simple. The following improvements would make it more robust.
+The following remain open. Bootstrap confidence intervals, per-row equations, drain-adjusted resource seconds, cache-row exclusion, OSL-ratio gating, and AIPerf version recording are already implemented.
 
 ## A. Repeat each measurement
 
@@ -960,42 +969,13 @@ Run every workload/concurrency point three or more times and report mean, median
 
 This reduces sensitivity to transient load and network noise.
 
-## B. Bootstrap confidence intervals for multipliers
+## B. Repeatable multiplier intervals under production noise
 
-Instead of reporting only:
-
-```text
-outputMultiplier = 3.8
-```
-
-report something such as:
-
-```text
-outputMultiplier = 3.8
-95% CI = [3.5, 4.1]
-```
+The fit already reports bootstrap 95% confidence intervals for `outputMultiplier` and `cachedMultiplier`. Those intervals still reflect only resampling of the selected synthetic points. Repeating each measurement under load would give a more realistic interval.
 
 ## C. Store the time-regression equations explicitly
 
-For auditability, future versions should record something like:
-
-```text
-prefill_16k/c32:
-  duration = 301.2 s
-  I = 31.2M
-  O = 1.8M
-  C = 0
-  equation = 31.2*a_M + 1.8*b_M ~= 301.2
-
-decode_2k/c16:
-  duration = 302.0 s
-  I = 4.1M
-  O = 8.4M
-  C = 0
-  equation = 4.1*a_M + 8.4*b_M ~= 302.0
-```
-
-This makes every fitted price traceable to actual measurements.
+`pricing_fit.json` now includes an `equations` array with per-row resource seconds, token counts, predicted seconds, residuals, and the explicit `I*a + O*b + C*c ~= T` identity used in the fit.
 
 ## D. Separate warm and cold cache tests
 
@@ -1071,48 +1051,37 @@ Useful plots include:
 
 ## K. Version benchmark methodology
 
-Record:
-
-- AIPerf version
-- benchmark plan version
-- tokenizer revision
-- served model name
-- model revision if known
-- endpoint configuration
-- date
-
-This is essential if results will be compared months later.
+`run_config.json` now records the AIPerf version string when available, tokenizer flags, plan file, max-context, and extra AIPerf args. Still worth adding model revision and endpoint configuration when those are known.
 
 ---
 
-# 15. Suggested future output format
+# 15. Output derivation
 
-For maximum auditability, a future `pricing_fit.json` should make the time-based measurement primary and keep optional accounting values separate.
-
-For example:
+`pricing_fit.json` keeps the time-based measurement primary and optional accounting values separate. The important fields are:
 
 ```json
 {
-  "measurement": {
-    "selected_runs": 9,
-    "benchmark_method": "AIPerf OpenAI API"
-  },
   "time_model": {
+    "seconds_per_token": {
+      "noncached_input": 1.0e-5,
+      "output": 4.2e-5,
+      "cached_input": 1.5e-6
+    },
     "seconds_per_million_tokens": {
       "noncached_input": 10.0,
       "output": 42.0,
       "cached_input": 1.5
     },
-    "weighted_capacity_mtok_per_hour": 360.0,
-    "multipliers": {
-      "input": 1.0,
-      "output": 4.2,
-      "cached": 0.15
-    }
+    "weighted_capacity_mtok_per_hour": 360.0
   },
-  "fit_quality": {
+  "multipliers": {
+    "inputMultiplier": 1.0,
+    "outputMultiplier": 4.2,
+    "cachedMultiplier": 0.15
+  },
+  "fit": {
     "relative_rmse": 0.07,
-    "runs_used": 9
+    "rows_used": 9
   },
   "optional_cost_model": {
     "resource_hour_cost": 400,
