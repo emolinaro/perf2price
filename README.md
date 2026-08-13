@@ -612,9 +612,11 @@ The benchmark is deliberately independent of that accounting policy.
 ## Required software
 
 - Bash
-- Python 3
+- Python 3.12 or 3.13 (tested)
 - NVIDIA AIPerf
 - NumPy
+
+The tested AIPerf and NumPy versions are pinned in `requirements.txt`.
 
 A simple installation is:
 
