@@ -674,9 +674,9 @@ The script defaults `--tokenizer` to `--model`.
   --tokenizer openai/gpt-oss-120b
 ```
 
-### Kimi K3
+### Exmaple: Kimi K3
 
-Kimi K3 currently requires custom tokenizer code when loaded through Hugging Face. Use:
+Kimi K3 requires custom tokenizer code when loaded through Hugging Face. Use:
 
 ```bash
 ./perf2price.sh \
