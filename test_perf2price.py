@@ -241,6 +241,42 @@ summary = {
             self.assertIn("fit_error", pricing)
             self.assertNotIn("multipliers", pricing)
 
+    def test_zero_output_coefficient_does_not_emit_models(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            (root / "run_config.json").write_text(
+                json.dumps({"model": "test-model", "random_seed": 1})
+            )
+            self.write_run(
+                root,
+                "input-heavy",
+                1,
+                self.summary(100, 10, 1, duration=10),
+                osl=10,
+            )
+            self.write_run(
+                root,
+                "output-heavy",
+                1,
+                self.summary(50, 100, 1, duration=5),
+                osl=100,
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                result = fit.main(
+                    ["perf2price_fit.py", str(root), "0", "0", "100"]
+                )
+
+            self.assertEqual(result, 0)
+            pricing = json.loads((root / "pricing_fit.json").read_text())
+            self.assertIn("fit_error", pricing)
+            self.assertIn("output coefficient is zero", pricing["fit_error"])
+            self.assertNotIn("time_model", pricing)
+            self.assertNotIn("multipliers", pricing)
+            self.assertNotIn("optional_cost_model", pricing)
+
     def test_nnls_requires_full_column_rank(self):
         X = np.asarray([[1.0, 2.0], [2.0, 4.0], [3.0, 6.0]])
         y = np.asarray([1.0, 2.0, 3.0])

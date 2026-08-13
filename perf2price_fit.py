@@ -627,6 +627,23 @@ def main(argv):
     c = coeff.get("cached_input") if have_cache else None
     cache_identified = have_cache and c is not None and c > ZERO_COEF_EPS
 
+    if a <= ZERO_COEF_EPS:
+        fit_result["fit_error"] = (
+            "fitted noncached-input coefficient is zero; workload matrix "
+            "does not identify an input baseline well enough"
+        )
+        (root / "pricing_fit.json").write_text(json.dumps(fit_result, indent=2) + "\n")
+        _print_report(root, fit_result)
+        return 0
+    if b <= ZERO_COEF_EPS:
+        fit_result["fit_error"] = (
+            "fitted output coefficient is zero; workload matrix does not "
+            "identify output cost well enough"
+        )
+        (root / "pricing_fit.json").write_text(json.dumps(fit_result, indent=2) + "\n")
+        _print_report(root, fit_result)
+        return 0
+
     equations = []
     for r, xrow, t_obs, t_hat in zip(fit_rows, X_rows, y, pred):
         parts = [
@@ -689,52 +706,46 @@ def main(argv):
         "weighted_capacity_mtok_per_hour": weighted_capacity,
     }
 
-    if a > ZERO_COEF_EPS:
-        multipliers = {
-            "inputMultiplier": 1.0,
-            "outputMultiplier": b / a,
-            "cachedMultiplier": (c / a) if cache_identified else None,
-        }
-        fit_result["multipliers"] = multipliers
-        fit_result["multiplier_confidence_intervals"] = bootstrap_multipliers(
-            X, y, names, BOOTSTRAP_SAMPLES, seed
-        )
+    multipliers = {
+        "inputMultiplier": 1.0,
+        "outputMultiplier": b / a,
+        "cachedMultiplier": (c / a) if cache_identified else None,
+    }
+    fit_result["multipliers"] = multipliers
+    fit_result["multiplier_confidence_intervals"] = bootstrap_multipliers(
+        X, y, names, BOOTSTRAP_SAMPLES, seed
+    )
 
-        if hour_cost is not None:
-            usd_per_resource_second = hour_cost / 3600.0
-            input_per_m = a * usd_per_resource_second * 1_000_000
-            output_per_m = b * usd_per_resource_second * 1_000_000
-            cache_per_m = (
-                c * usd_per_resource_second * 1_000_000 if cache_identified else None
-            )
-            fit_result["resource_hour_cost_usd"] = hour_cost
-            fit_result["optional_cost_model"] = {
-                "resource_hour_cost": hour_cost,
-                "cost_recovery_per_million_tokens": {
-                    "noncached_input": input_per_m,
-                    "output": output_per_m,
-                    "cached_input": cache_per_m,
-                },
-            }
-            fit_result["cost_recovery_usd_per_million_tokens"] = {
+    if hour_cost is not None:
+        usd_per_resource_second = hour_cost / 3600.0
+        input_per_m = a * usd_per_resource_second * 1_000_000
+        output_per_m = b * usd_per_resource_second * 1_000_000
+        cache_per_m = (
+            c * usd_per_resource_second * 1_000_000 if cache_identified else None
+        )
+        fit_result["resource_hour_cost_usd"] = hour_cost
+        fit_result["optional_cost_model"] = {
+            "resource_hour_cost": hour_cost,
+            "cost_recovery_per_million_tokens": {
                 "noncached_input": input_per_m,
                 "output": output_per_m,
                 "cached_input": cache_per_m,
-            }
-            fit_result["cost_formula"] = (
-                "cost_usd = "
-                "noncached_input_tokens*input_usd_per_token + "
-                "output_tokens*output_usd_per_token"
-                + (
-                    " + cached_input_tokens*cached_input_usd_per_token"
-                    if cache_identified
-                    else ""
-                )
+            },
+        }
+        fit_result["cost_recovery_usd_per_million_tokens"] = {
+            "noncached_input": input_per_m,
+            "output": output_per_m,
+            "cached_input": cache_per_m,
+        }
+        fit_result["cost_formula"] = (
+            "cost_usd = "
+            "noncached_input_tokens*input_usd_per_token + "
+            "output_tokens*output_usd_per_token"
+            + (
+                " + cached_input_tokens*cached_input_usd_per_token"
+                if cache_identified
+                else ""
             )
-    else:
-        fit_result["fit_error"] = (
-            "fitted noncached-input coefficient is zero; workload matrix "
-            "does not identify an input baseline well enough"
         )
 
     (root / "pricing_fit.json").write_text(json.dumps(fit_result, indent=2) + "\n")

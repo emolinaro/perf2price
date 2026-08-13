@@ -235,13 +235,13 @@ output tokens           = 1.8 million
 cached input tokens     = 0
 ```
 
-That one observation gives:
+That one observation gives the per-token equation:
 
 $$
-31.2a + 1.8b + 0c \approx 301.4
+31.2 \times 10^6 a + 1.8 \times 10^6 b + 0c \approx 301.4
 $$
 
-where the coefficients are measured in **seconds per token**. Seconds per million tokens are `a × 10^6`, and so on.
+where the coefficients are measured in **seconds per token**. The corresponding seconds-per-MTok coefficients are `a_M = a × 10^6`, `b_M = b × 10^6`, and `c_M = c × 10^6`.
 
 Another decode-heavy run might produce:
 
@@ -256,7 +256,7 @@ cached input tokens     = 0
 which gives:
 
 $$
-4.1a + 8.4b + 0c \approx 302.1
+4.1 \times 10^6 a + 8.4 \times 10^6 b + 0c \approx 302.1
 $$
 
 A cache-heavy run might produce:
@@ -272,7 +272,7 @@ cached input tokens     = 47.5 million
 which gives:
 
 $$
-3.2a + 2.0b + 47.5c \approx 300.8
+3.2 \times 10^6 a + 2.0 \times 10^6 b + 47.5 \times 10^6 c \approx 300.8
 $$
 
 These are the actual equations used to infer how much serving time each type of token consumes.
@@ -295,26 +295,26 @@ Assume three idealized benchmark runs give:
 | Decode-heavy | 2M | 5M | 0M | 220 s |
 | Cache-heavy | 2M | 1M | 30M | 120 s |
 
-Using millions of tokens, the equations are:
+For readability, define `a_M = a × 10^6`, `b_M = b × 10^6`, and `c_M = c × 10^6`, measured in seconds per MTok. Using the table's MTok values, the equations are:
 
 $$
-20a + b = 240
-$$
-
-$$
-2a + 5b = 220
+20a_M + b_M = 240
 $$
 
 $$
-2a + b + 30c = 120
+2a_M + 5b_M = 220
+$$
+
+$$
+2a_M + b_M + 30c_M = 120
 $$
 
 The measured time coefficients are:
 
 ```text
-input coefficient  a = 10 seconds / MTok
-output coefficient b = 40 seconds / MTok
-cache coefficient  c =  2 seconds / MTok
+input coefficient  a_M = 10 seconds / MTok
+output coefficient b_M = 40 seconds / MTok
+cache coefficient  c_M =  2 seconds / MTok
 ```
 
 The normalized multipliers follow directly:
@@ -324,11 +324,11 @@ inputMultiplier = 1
 $$
 
 $$
-outputMultiplier = \frac{40}{10} = 4
+outputMultiplier = \frac{b_M}{a_M} = \frac{40}{10} = 4
 $$
 
 $$
-cachedMultiplier = \frac{2}{10} = 0.2
+cachedMultiplier = \frac{c_M}{a_M} = \frac{2}{10} = 0.2
 $$
 
 The resulting weighted-token equation is:
@@ -478,15 +478,15 @@ The same result can also be calculated from weighted capacity.
 If:
 
 $$
-Q_{weighted} =
-\frac{3600}{a}
+Q_{weighted,M} =
+\frac{3600}{a \times 10^6}
 $$
 
-then the base price per million weighted tokens is:
+where `Q_{weighted,M}` is measured in input-equivalent MTok per hour, then the base price per million weighted tokens is:
 
 $$
 B =
-\frac{H}{Q_{weighted}}
+\frac{H}{Q_{weighted,M}}
 $$
 
 The token prices are:
