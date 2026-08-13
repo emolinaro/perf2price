@@ -16,7 +16,7 @@ set -euo pipefail
 #      the matrix.
 #   7. Fits drain-adjusted resource seconds in rate space:
 #
-#        T = requested_duration + 0.5 * max(0, measured_duration - requested)
+#        T = measured_duration - 0.5 * max(0, measured_duration - requested)
 #        1 ~= a * (I / T) + b * (O / T) + c * (C / T)
 #
 #      Cache-plan rows without reported cache hits are excluded from the fit.
@@ -71,7 +71,7 @@ SKIP_PROBE=0
 EXTRA_AIPERF_ARGS=()
 
 usage() {
-  cat <<'EOF'
+	cat <<'EOF'
 Usage:
   perf2price.sh --url URL --model MODEL [options]
 
@@ -161,120 +161,120 @@ EOF
 }
 
 die() {
-  echo "ERROR: $*" >&2
-  exit 1
+	echo "ERROR: $*" >&2
+	exit 1
 }
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-  --url)
-    URL="${2:?missing value for --url}"
-    shift 2
-    ;;
-  --model)
-    MODEL="${2:?missing value for --model}"
-    shift 2
-    ;;
-  --tokenizer)
-    TOKENIZER="${2:?missing value for --tokenizer}"
-    shift 2
-    ;;
-  --tokenizer-revision)
-    TOKENIZER_REVISION="${2:?missing value for --tokenizer-revision}"
-    shift 2
-    ;;
-  --tokenizer-trust-remote-code)
-    TOKENIZER_TRUST_REMOTE_CODE=1
-    shift
-    ;;
-  --apply-chat-template)
-    APPLY_CHAT_TEMPLATE=1
-    shift
-    ;;
-  --endpoint)
-    ENDPOINT="${2:?missing value for --endpoint}"
-    shift 2
-    ;;
-  --models-endpoint)
-    MODELS_ENDPOINT="${2:?missing value for --models-endpoint}"
-    shift 2
-    ;;
-  --api-key)
-    API_KEY="${2:?missing value for --api-key}"
-    shift 2
-    ;;
-  --api-key=*)
-    API_KEY="${1#--api-key=}"
-    [[ -n "$API_KEY" ]] || die "missing value for --api-key"
-    shift
-    ;;
-  --concurrency)
-    CONCURRENCY_LIST="${2:?missing value for --concurrency}"
-    shift 2
-    ;;
-  --duration)
-    DURATION="${2:?missing value for --duration}"
-    shift 2
-    ;;
-  --grace-period)
-    GRACE_PERIOD="${2:?missing value for --grace-period}"
-    shift 2
-    ;;
-  --out-dir)
-    OUT_DIR="${2:?missing value for --out-dir}"
-    shift 2
-    ;;
-  --plan)
-    PLAN_FILE="${2:?missing value for --plan}"
-    shift 2
-    ;;
-  --max-context)
-    MAX_CONTEXT="${2:?missing value for --max-context}"
-    shift 2
-    ;;
-  --ttft-p99-ms)
-    TTFT_P99_MS="${2:?missing value for --ttft-p99-ms}"
-    shift 2
-    ;;
-  --itl-p99-ms)
-    ITL_P99_MS="${2:?missing value for --itl-p99-ms}"
-    shift 2
-    ;;
-  --resource-hour-cost)
-    RESOURCE_HOUR_COST="${2:?missing value for --resource-hour-cost}"
-    shift 2
-    ;;
-  --random-seed)
-    RANDOM_SEED="${2:?missing value for --random-seed}"
-    shift 2
-    ;;
-  --num-dataset-entries)
-    NUM_DATASET_ENTRIES="${2:?missing value for --num-dataset-entries}"
-    shift 2
-    ;;
-  --no-cache-tests)
-    RUN_CACHE_TESTS=0
-    shift
-    ;;
-  --legacy-max-tokens)
-    LEGACY_MAX_TOKENS=1
-    shift
-    ;;
-  --skip-probe)
-    SKIP_PROBE=1
-    shift
-    ;;
-  -h | --help)
-    usage
-    exit 0
-    ;;
-  --)
-    shift
-    EXTRA_AIPERF_ARGS=("$@")
-    break
-    ;;
-  *) die "unknown option: $1 (use --help)" ;;
-  esac
+	case "$1" in
+	--url)
+		URL="${2:?missing value for --url}"
+		shift 2
+		;;
+	--model)
+		MODEL="${2:?missing value for --model}"
+		shift 2
+		;;
+	--tokenizer)
+		TOKENIZER="${2:?missing value for --tokenizer}"
+		shift 2
+		;;
+	--tokenizer-revision)
+		TOKENIZER_REVISION="${2:?missing value for --tokenizer-revision}"
+		shift 2
+		;;
+	--tokenizer-trust-remote-code)
+		TOKENIZER_TRUST_REMOTE_CODE=1
+		shift
+		;;
+	--apply-chat-template)
+		APPLY_CHAT_TEMPLATE=1
+		shift
+		;;
+	--endpoint)
+		ENDPOINT="${2:?missing value for --endpoint}"
+		shift 2
+		;;
+	--models-endpoint)
+		MODELS_ENDPOINT="${2:?missing value for --models-endpoint}"
+		shift 2
+		;;
+	--api-key)
+		API_KEY="${2:?missing value for --api-key}"
+		shift 2
+		;;
+	--api-key=*)
+		API_KEY="${1#--api-key=}"
+		[[ -n "$API_KEY" ]] || die "missing value for --api-key"
+		shift
+		;;
+	--concurrency)
+		CONCURRENCY_LIST="${2:?missing value for --concurrency}"
+		shift 2
+		;;
+	--duration)
+		DURATION="${2:?missing value for --duration}"
+		shift 2
+		;;
+	--grace-period)
+		GRACE_PERIOD="${2:?missing value for --grace-period}"
+		shift 2
+		;;
+	--out-dir)
+		OUT_DIR="${2:?missing value for --out-dir}"
+		shift 2
+		;;
+	--plan)
+		PLAN_FILE="${2:?missing value for --plan}"
+		shift 2
+		;;
+	--max-context)
+		MAX_CONTEXT="${2:?missing value for --max-context}"
+		shift 2
+		;;
+	--ttft-p99-ms)
+		TTFT_P99_MS="${2:?missing value for --ttft-p99-ms}"
+		shift 2
+		;;
+	--itl-p99-ms)
+		ITL_P99_MS="${2:?missing value for --itl-p99-ms}"
+		shift 2
+		;;
+	--resource-hour-cost)
+		RESOURCE_HOUR_COST="${2:?missing value for --resource-hour-cost}"
+		shift 2
+		;;
+	--random-seed)
+		RANDOM_SEED="${2:?missing value for --random-seed}"
+		shift 2
+		;;
+	--num-dataset-entries)
+		NUM_DATASET_ENTRIES="${2:?missing value for --num-dataset-entries}"
+		shift 2
+		;;
+	--no-cache-tests)
+		RUN_CACHE_TESTS=0
+		shift
+		;;
+	--legacy-max-tokens)
+		LEGACY_MAX_TOKENS=1
+		shift
+		;;
+	--skip-probe)
+		SKIP_PROBE=1
+		shift
+		;;
+	-h | --help)
+		usage
+		exit 0
+		;;
+	--)
+		shift
+		EXTRA_AIPERF_ARGS=("$@")
+		break
+		;;
+	*) die "unknown option: $1 (use --help)" ;;
+	esac
 done
 
 [[ -n "$URL" ]] || die "--url is required"
@@ -293,13 +293,13 @@ mkdir -p "$OUT_DIR"
 
 echo "Tokenizer used by AIPerf: $TOKENIZER"
 if [[ "$TOKENIZER" = "builtin" ]]; then
-  echo "WARNING: using AIPerf's generic builtin tokenizer; prefer the model-specific tokenizer for precise ISL calibration." >&2
+	echo "WARNING: using AIPerf's generic builtin tokenizer; prefer the model-specific tokenizer for precise ISL calibration." >&2
 fi
 
 # Validate numeric-ish arguments early.
 "$PYTHON_BIN" - "$DURATION" "$GRACE_PERIOD" "$MAX_CONTEXT" \
-  "$TTFT_P99_MS" "$ITL_P99_MS" "${RESOURCE_HOUR_COST:-}" \
-  "$RANDOM_SEED" "$NUM_DATASET_ENTRIES" <<'PY'
+	"$TTFT_P99_MS" "$ITL_P99_MS" "${RESOURCE_HOUR_COST:-}" \
+	"$RANDOM_SEED" "$NUM_DATASET_ENTRIES" <<'PY'
 import sys
 duration, grace, max_context, ttft, itl, hourly, seed, entries = sys.argv[1:]
 if float(duration) <= 0:
@@ -323,9 +323,9 @@ PY
 # For cache rows, total intended prompt size is roughly prefix_tokens + isl.
 DEFAULT_PLAN="${OUT_DIR}/benchmark_plan.csv"
 if [[ -n "$PLAN_FILE" ]]; then
-  cp "$PLAN_FILE" "$DEFAULT_PLAN"
+	cp "$PLAN_FILE" "$DEFAULT_PLAN"
 else
-  cat >"$DEFAULT_PLAN" <<'EOF'
+	cat >"$DEFAULT_PLAN" <<'EOF'
 name,isl,osl,prefix_tokens
 prefill_1k,1024,64,0
 prefill_4k,4096,64,0
@@ -341,7 +341,7 @@ fi
 
 # Validate concurrency list and compute max.
 MAX_CONCURRENCY="$(
-  "$PYTHON_BIN" - "$CONCURRENCY_LIST" <<'PY'
+	"$PYTHON_BIN" - "$CONCURRENCY_LIST" <<'PY'
 import sys
 items = [x.strip() for x in sys.argv[1].split(",") if x.strip()]
 if not items:
@@ -362,7 +362,7 @@ export AIPERF_HTTP_CONNECTION_LIMIT="${AIPERF_HTTP_CONNECTION_LIMIT:-$((MAX_CONC
 # (MODEL/URL may contain characters that would corrupt a raw heredoc).
 EXTRA_JSON='[]'
 if [[ ${#EXTRA_AIPERF_ARGS[@]} -gt 0 ]]; then
-  EXTRA_JSON="$("$PYTHON_BIN" -c '
+	EXTRA_JSON="$("$PYTHON_BIN" -c '
 import json
 import sys
 
@@ -383,13 +383,13 @@ print(json.dumps(redacted))
 ' "${EXTRA_AIPERF_ARGS[@]}")"
 fi
 "$PYTHON_BIN" - "${OUT_DIR}/run_config.json" \
-  "$URL" "$ENDPOINT" "$MODELS_ENDPOINT" "$MODEL" "$TOKENIZER" \
-  "$TOKENIZER_REVISION" "$CONCURRENCY_LIST" "$DURATION" "$GRACE_PERIOD" \
-  "$TTFT_P99_MS" "$ITL_P99_MS" "${RESOURCE_HOUR_COST:-}" \
-  "$RANDOM_SEED" "$NUM_DATASET_ENTRIES" \
-  "$TOKENIZER_TRUST_REMOTE_CODE" "$APPLY_CHAT_TEMPLATE" \
-  "$LEGACY_MAX_TOKENS" "$RUN_CACHE_TESTS" "$SKIP_PROBE" "$MAX_CONTEXT" \
-  "${PLAN_FILE:-}" "${AIPERF_VERSION:-}" "$EXTRA_JSON" <<'PY'
+	"$URL" "$ENDPOINT" "$MODELS_ENDPOINT" "$MODEL" "$TOKENIZER" \
+	"$TOKENIZER_REVISION" "$CONCURRENCY_LIST" "$DURATION" "$GRACE_PERIOD" \
+	"$TTFT_P99_MS" "$ITL_P99_MS" "${RESOURCE_HOUR_COST:-}" \
+	"$RANDOM_SEED" "$NUM_DATASET_ENTRIES" \
+	"$TOKENIZER_TRUST_REMOTE_CODE" "$APPLY_CHAT_TEMPLATE" \
+	"$LEGACY_MAX_TOKENS" "$RUN_CACHE_TESTS" "$SKIP_PROBE" "$MAX_CONTEXT" \
+	"${PLAN_FILE:-}" "${AIPERF_VERSION:-}" "$EXTRA_JSON" <<'PY'
 import json
 import sys
 
@@ -433,8 +433,8 @@ with open(path, "w", encoding="utf-8") as f:
 PY
 
 probe_endpoint() {
-  echo "Probing OpenAI-compatible endpoint: ${URL}${ENDPOINT}"
-  "$PYTHON_BIN" - "$URL" "$MODELS_ENDPOINT" "$ENDPOINT" "$MODEL" "$API_KEY" "$LEGACY_MAX_TOKENS" <<'PY'
+	echo "Probing OpenAI-compatible endpoint: ${URL}${ENDPOINT}"
+	"$PYTHON_BIN" - "$URL" "$MODELS_ENDPOINT" "$ENDPOINT" "$MODEL" "$API_KEY" "$LEGACY_MAX_TOKENS" <<'PY'
 import json
 import math
 import sys
@@ -573,7 +573,7 @@ PY
 }
 
 if [[ "$SKIP_PROBE" -eq 0 ]]; then
-  probe_endpoint
+	probe_endpoint
 fi
 
 # Split and normalize the concurrency list (trims spaces, drops empty
@@ -581,24 +581,24 @@ fi
 IFS=',' read -r -a CONCURRENCIES_RAW <<<"$CONCURRENCY_LIST"
 CONCURRENCIES=()
 for c in "${CONCURRENCIES_RAW[@]}"; do
-  c="${c//[[:space:]]/}"
-  if [[ -n "$c" ]]; then
-    CONCURRENCIES+=("$c")
-  fi
+	c="${c//[[:space:]]/}"
+	if [[ -n "$c" ]]; then
+		CONCURRENCIES+=("$c")
+	fi
 done
 
 run_one() {
-  local name="$1"
-  local isl="$2"
-  local osl="$3"
-  local prefix="$4"
-  local concurrency="$5"
+	local name="$1"
+	local isl="$2"
+	local osl="$3"
+	local prefix="$4"
+	local concurrency="$5"
 
-  local run_dir="${OUT_DIR}/runs/${name}/c${concurrency}"
-  mkdir -p "$run_dir"
+	local run_dir="${OUT_DIR}/runs/${name}/c${concurrency}"
+	mkdir -p "$run_dir"
 
-  "$PYTHON_BIN" - "${run_dir}/run_context.json" \
-    "$name" "$isl" "$osl" "$prefix" "$concurrency" "$DURATION" <<'PY'
+	"$PYTHON_BIN" - "${run_dir}/run_context.json" \
+		"$name" "$isl" "$osl" "$prefix" "$concurrency" "$DURATION" <<'PY'
 import json
 import sys
 
@@ -619,97 +619,97 @@ with open(path, "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 
-  local warmup="$concurrency"
-  if ((warmup < 4)); then
-    warmup=4
-  fi
+	local warmup="$concurrency"
+	if ((warmup < 4)); then
+		warmup=4
+	fi
 
-  local -a cmd=(
-    "$AIPERF_BIN" profile
-    --artifact-dir "$run_dir"
-    --model "$MODEL"
-    --tokenizer "$TOKENIZER"
-    --endpoint-type chat
-    --endpoint "$ENDPOINT"
-    --url "$URL"
-    --streaming
-    --use-server-token-count
-    --synthetic-input-tokens-mean "$isl"
-    --synthetic-input-tokens-stddev 0
-    --output-tokens-mean "$osl"
-    --output-tokens-stddev 0
-    --concurrency "$concurrency"
-    --benchmark-duration "$DURATION"
-    --benchmark-grace-period "$GRACE_PERIOD"
-    --warmup-request-count "$warmup"
-    --num-dataset-entries "$NUM_DATASET_ENTRIES"
-    --random-seed "$RANDOM_SEED"
-    --no-server-metrics
-    --export-level summary
-    --ui simple
-  )
+	local -a cmd=(
+		"$AIPERF_BIN" profile
+		--artifact-dir "$run_dir"
+		--model "$MODEL"
+		--tokenizer "$TOKENIZER"
+		--endpoint-type chat
+		--endpoint "$ENDPOINT"
+		--url "$URL"
+		--streaming
+		--use-server-token-count
+		--synthetic-input-tokens-mean "$isl"
+		--synthetic-input-tokens-stddev 0
+		--output-tokens-mean "$osl"
+		--output-tokens-stddev 0
+		--concurrency "$concurrency"
+		--benchmark-duration "$DURATION"
+		--benchmark-grace-period "$GRACE_PERIOD"
+		--warmup-request-count "$warmup"
+		--num-dataset-entries "$NUM_DATASET_ENTRIES"
+		--random-seed "$RANDOM_SEED"
+		--no-server-metrics
+		--export-level summary
+		--ui simple
+	)
 
-  if [[ -n "$TOKENIZER_REVISION" ]]; then
-    cmd+=(--tokenizer-revision "$TOKENIZER_REVISION")
-  fi
+	if [[ -n "$TOKENIZER_REVISION" ]]; then
+		cmd+=(--tokenizer-revision "$TOKENIZER_REVISION")
+	fi
 
-  if [[ "$TOKENIZER_TRUST_REMOTE_CODE" -eq 1 ]]; then
-    cmd+=(--tokenizer-trust-remote-code)
-  fi
+	if [[ "$TOKENIZER_TRUST_REMOTE_CODE" -eq 1 ]]; then
+		cmd+=(--tokenizer-trust-remote-code)
+	fi
 
-  if [[ "$APPLY_CHAT_TEMPLATE" -eq 1 ]]; then
-    cmd+=(--apply-chat-template)
-  fi
+	if [[ "$APPLY_CHAT_TEMPLATE" -eq 1 ]]; then
+		cmd+=(--apply-chat-template)
+	fi
 
-  if [[ -n "$API_KEY" ]]; then
-    cmd+=(--api-key "$API_KEY")
-  fi
+	if [[ -n "$API_KEY" ]]; then
+		cmd+=(--api-key "$API_KEY")
+	fi
 
-  if [[ "$LEGACY_MAX_TOKENS" -eq 1 ]]; then
-    cmd+=(--use-legacy-max-tokens)
-  fi
+	if [[ "$LEGACY_MAX_TOKENS" -eq 1 ]]; then
+		cmd+=(--use-legacy-max-tokens)
+	fi
 
-  if ((prefix > 0)); then
-    # Pool size 1 is intentional: after warmup, this gives a deterministic
-    # repeatedly-used prefix and maximizes the chance of observable cache hits.
-    cmd+=(
-      --prefix-prompt-length "$prefix"
-      --prefix-prompt-pool-size 1
-    )
-  fi
+	if ((prefix > 0)); then
+		# Pool size 1 is intentional: after warmup, this gives a deterministic
+		# repeatedly-used prefix and maximizes the chance of observable cache hits.
+		cmd+=(
+			--prefix-prompt-length "$prefix"
+			--prefix-prompt-pool-size 1
+		)
+	fi
 
-  if [[ ${#EXTRA_AIPERF_ARGS[@]} -gt 0 ]]; then
-    cmd+=("${EXTRA_AIPERF_ARGS[@]}")
-  fi
+	if [[ ${#EXTRA_AIPERF_ARGS[@]} -gt 0 ]]; then
+		cmd+=("${EXTRA_AIPERF_ARGS[@]}")
+	fi
 
-  echo
-  echo "======================================================================"
-  echo "Profile=$name ISL=$isl OSL=$osl prefix=$prefix concurrency=$concurrency"
-  # Print the command for reproducibility, but redact the API key value so
-  # secrets do not end up in terminal scrollback or captured logs.
-  printf 'Command:'
-  local prev=""
-  local arg
-  for arg in "${cmd[@]}"; do
-    if [[ "$prev" == "--api-key" ]]; then
-      printf ' %q' "REDACTED"
-    elif [[ "$arg" == --api-key=* ]]; then
-      printf ' %q' "--api-key=REDACTED"
-    else
-      printf ' %q' "$arg"
-    fi
-    prev="$arg"
-  done
-  printf '\n'
-  echo "======================================================================"
+	echo
+	echo "======================================================================"
+	echo "Profile=$name ISL=$isl OSL=$osl prefix=$prefix concurrency=$concurrency"
+	# Print the command for reproducibility, but redact the API key value so
+	# secrets do not end up in terminal scrollback or captured logs.
+	printf 'Command:'
+	local prev=""
+	local arg
+	for arg in "${cmd[@]}"; do
+		if [[ "$prev" == "--api-key" ]]; then
+			printf ' %q' "REDACTED"
+		elif [[ "$arg" == --api-key=* ]]; then
+			printf ' %q' "--api-key=REDACTED"
+		else
+			printf ' %q' "$arg"
+		fi
+		prev="$arg"
+	done
+	printf '\n'
+	echo "======================================================================"
 
-  local rc
-  set +e
-  "${cmd[@]}"
-  rc=$?
-  set -e
+	local rc
+	set +e
+	"${cmd[@]}"
+	rc=$?
+	set -e
 
-  "$PYTHON_BIN" - "${run_dir}/run_context.json" "$rc" <<'PY'
+	"$PYTHON_BIN" - "${run_dir}/run_context.json" "$rc" <<'PY'
 import json
 import sys
 
@@ -723,9 +723,9 @@ with open(path, "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 
-  if [[ "$rc" -ne 0 ]]; then
-    echo "WARNING: AIPerf failed for profile=$name concurrency=$concurrency (exit $rc); continuing." >&2
-  fi
+	if [[ "$rc" -ne 0 ]]; then
+		echo "WARNING: AIPerf failed for profile=$name concurrency=$concurrency (exit $rc); continuing." >&2
+	fi
 }
 
 echo
@@ -736,35 +736,35 @@ echo
 # The final '|| [[ -n "$name" ]]' keeps a last row without a trailing
 # newline from being silently dropped.
 while IFS=',' read -r name isl osl prefix || [[ -n "$name" ]]; do
-  # Strip whitespace first so " name, ..." or indented rows still match
-  # the header/comment guards below.
-  name="${name//[[:space:]]/}"
-  isl="${isl//[[:space:]]/}"
-  osl="${osl//[[:space:]]/}"
-  prefix="${prefix//[[:space:]]/}"
+	# Strip whitespace first so " name, ..." or indented rows still match
+	# the header/comment guards below.
+	name="${name//[[:space:]]/}"
+	isl="${isl//[[:space:]]/}"
+	osl="${osl//[[:space:]]/}"
+	prefix="${prefix//[[:space:]]/}"
 
-  # Skip header and empty/comment lines.
-  [[ "$name" == "name" ]] && continue
-  [[ -z "$name" ]] && continue
-  [[ "${name:0:1}" == "#" ]] && continue
+	# Skip header and empty/comment lines.
+	[[ "$name" == "name" ]] && continue
+	[[ -z "$name" ]] && continue
+	[[ "${name:0:1}" == "#" ]] && continue
 
-  [[ "$isl" =~ ^[0-9]+$ ]] || die "invalid ISL for '$name': $isl"
-  [[ "$osl" =~ ^[0-9]+$ ]] || die "invalid OSL for '$name': $osl"
-  [[ "$prefix" =~ ^[0-9]+$ ]] || die "invalid prefix_tokens for '$name': $prefix"
+	[[ "$isl" =~ ^[0-9]+$ ]] || die "invalid ISL for '$name': $isl"
+	[[ "$osl" =~ ^[0-9]+$ ]] || die "invalid OSL for '$name': $osl"
+	[[ "$prefix" =~ ^[0-9]+$ ]] || die "invalid prefix_tokens for '$name': $prefix"
 
-  if ((prefix > 0 && RUN_CACHE_TESTS == 0)); then
-    echo "Skipping cache profile '$name' (--no-cache-tests)"
-    continue
-  fi
+	if ((prefix > 0 && RUN_CACHE_TESTS == 0)); then
+		echo "Skipping cache profile '$name' (--no-cache-tests)"
+		continue
+	fi
 
-  if ((MAX_CONTEXT > 0 && isl + prefix + osl > MAX_CONTEXT)); then
-    echo "Skipping '$name': intended ISL+prefix+OSL=$((isl + prefix + osl)) > max context $MAX_CONTEXT"
-    continue
-  fi
+	if ((MAX_CONTEXT > 0 && isl + prefix + osl > MAX_CONTEXT)); then
+		echo "Skipping '$name': intended ISL+prefix+OSL=$((isl + prefix + osl)) > max context $MAX_CONTEXT"
+		continue
+	fi
 
-  for concurrency in "${CONCURRENCIES[@]}"; do
-    run_one "$name" "$isl" "$osl" "$prefix" "$concurrency"
-  done
+	for concurrency in "${CONCURRENCIES[@]}"; do
+		run_one "$name" "$isl" "$osl" "$prefix" "$concurrency"
+	done
 done <"$DEFAULT_PLAN"
 
 # Parse results, select one capacity point per workload, and fit coefficients.

@@ -34,6 +34,7 @@ perf2price/
 ├── requirements.txt
 ├── perf2price.sh
 ├── perf2price_fit.py
+├── test_perf2price.py
 └── examples/
     └── benchmark-plan.csv
 ```
@@ -46,7 +47,7 @@ The benchmark starts from quantities that are directly measured during an AIPerf
 
 For each selected benchmark run, the harness records:
 
-- `T` = drain-adjusted resource seconds (the requested profiling window, plus half of any grace-period tail reported by AIPerf)
+- `T` = drain-adjusted resource seconds (the measured span, with half of any grace-period tail discounted)
 - `I` = non-cached input tokens reported by the OpenAI-compatible API
 - `O` = output tokens reported by the OpenAI-compatible API
 - `C` = cached input tokens reported by the OpenAI-compatible API, when available
@@ -54,7 +55,7 @@ For each selected benchmark run, the harness records:
 The key point is that **time is the primary resource quantity**. AIPerf's raw `benchmark_duration` is last-response minus first-request, so it includes the cooldown after `--benchmark-duration` while in-flight requests drain. Decode-heavy runs have longer tails. The harness therefore uses:
 
 $$
-T = T_{\text{requested}} + \tfrac{1}{2}\max(0, T_{\text{measured}} - T_{\text{requested}})
+T = T_{\text{measured}} - \tfrac{1}{2}\max(0, T_{\text{measured}} - T_{\text{requested}})
 $$
 
 The benchmark does **not** need a monetary cost to determine the relative cost of input, output, and cached tokens.
@@ -110,14 +111,16 @@ The first stage is always available and is the important one.
 flowchart TD
     A[OpenAI-compatible endpoint] --> B[AIPerf workload matrix]
 
-    B --> C[AIPerf measured duration T]
+    B --> C[AIPerf measured duration]
     B --> D[OpenAI API usage]
+
+    C --> R[Drain-adjusted resource time T]
 
     D --> E[Non-cached input I]
     D --> F[Output O]
     D --> G[Cached input C]
 
-    C --> H[Time regression]
+    R --> H[Time regression]
     E --> H
     F --> H
     G --> H
@@ -161,7 +164,7 @@ The default concurrency sweep is:
 4,8,16,32,64
 ```
 
-The important result for coefficient fitting is not the requested ISL or OSL alone. It is the **actual token usage reported by the server** together with the **actual benchmark duration reported by AIPerf**.
+The important result for coefficient fitting is not the requested ISL or OSL alone. It is the **actual token usage reported by the server** together with the **requested profiling window and actual benchmark duration reported by AIPerf**.
 
 ---
 
@@ -857,7 +860,7 @@ If a selected point is at the largest tested concurrency and throughput is still
 
 ## `pricing_fit.json`
 
-Contains the fitted time coefficients (seconds per token and seconds per million tokens), normalized multipliers with bootstrap 95% confidence intervals, weighted serving capacity (`3600 / a / 10^6` input-equivalent MTok per hour), per-row regression equations and residuals, fit quality (relative RMSE, rate RMSE, condition number), and optional cost-units/MTok values when `--resource-hour-cost` was supplied.
+Contains the fitted time coefficients (seconds per token and seconds per million tokens), normalized multipliers with bootstrap 95% confidence intervals when enough stable resamples are available, weighted serving capacity (`3600 / a / 10^6` input-equivalent MTok per hour), per-row regression equations and residuals, fit quality (relative RMSE, rate RMSE, condition number), and optional cost-units/MTok values when `--resource-hour-cost` was supplied.
 
 ---
 
@@ -969,7 +972,7 @@ This produces a much more defensible comparison than copying public API pricing 
 
 # 14. Improvements to consider
 
-The following remain open. Bootstrap confidence intervals, per-row equations, drain-adjusted resource seconds, cache-row exclusion, OSL-ratio gating, and AIPerf version recording are already implemented.
+The following improvements remain open.
 
 ## A. Repeat each measurement
 
@@ -981,11 +984,7 @@ This reduces sensitivity to transient load and network noise.
 
 The fit already reports bootstrap 95% confidence intervals for `outputMultiplier` and `cachedMultiplier`. Those intervals still reflect only resampling of the selected synthetic points. Repeating each measurement under load would give a more realistic interval.
 
-## C. Store the time-regression equations explicitly
-
-`pricing_fit.json` now includes an `equations` array with per-row resource seconds, token counts, predicted seconds, residuals, and the explicit `I*a + O*b + C*c ~= T` identity used in the fit.
-
-## D. Separate warm and cold cache tests
+## C. Separate warm and cold cache tests
 
 Measure:
 
@@ -995,7 +994,7 @@ Measure:
 
 This can reveal whether one linear cache multiplier is adequate.
 
-## E. Fit context-length tiers
+## D. Fit context-length tiers
 
 Input cost may change substantially with prompt length.
 
@@ -1010,7 +1009,7 @@ Instead of one global input price, consider:
 
 Then fit separate input coefficients per tier.
 
-## F. Add interaction terms
+## E. Add interaction terms
 
 If the additive model has high error, test a richer model such as:
 
@@ -1022,17 +1021,17 @@ or fit separate operating regions.
 
 Do not add complexity unless the simpler model demonstrably fails.
 
-## G. Validate against production traces
+## F. Validate against production traces
 
 Once real usage exists, compare predicted resource cost against observed production traffic.
 
 A pricing model calibrated entirely on synthetic traffic should be validated against realistic prompt/output distributions.
 
-## H. Add open-loop request-rate tests
+## G. Add open-loop request-rate tests
 
 Concurrency tests model a fixed number of active users. Open-loop request-rate tests can better represent arrival processes in shared services.
 
-## I. Add optional GPU/energy telemetry
+## H. Add optional GPU/energy telemetry
 
 The core benchmark deliberately requires only the OpenAI API.
 
@@ -1045,7 +1044,7 @@ An optional mode could additionally collect:
 
 This should remain optional so the benchmark stays backend-independent.
 
-## J. Generate comparison plots automatically
+## I. Generate comparison plots automatically
 
 Useful plots include:
 
@@ -1057,9 +1056,9 @@ Useful plots include:
 - predicted vs observed run cost
 - regression residuals
 
-## K. Version benchmark methodology
+## J. Version benchmark methodology
 
-`run_config.json` now records the AIPerf version string when available, tokenizer flags, plan file, max-context, and extra AIPerf args. Still worth adding model revision and endpoint configuration when those are known.
+`run_config.json` now records the AIPerf version string when available, tokenizer flags, plan file, max-context, and extra AIPerf args. The served model revision and backend deployment configuration should also be recorded when known.
 
 ---
 
@@ -1146,14 +1145,16 @@ flowchart TD
     E --> G
     F --> G
 
-    G --> H[AIPerf measured duration T]
+    G --> H[AIPerf measured duration]
     G --> I[OpenAI API usage]
+
+    H --> HA[Drain-adjusted resource time T]
 
     I --> J[I = prompt - cached]
     I --> K[O = completion]
     I --> L[C = cached]
 
-    H --> M[Fit T ~= aI + bO + cC]
+    HA --> M[Fit T ~= aI + bO + cC]
     J --> M
     K --> M
     L --> M
@@ -1180,7 +1181,7 @@ flowchart TD
 
 The most important principle is:
 
-> **AIPerf measures time. The OpenAI-compatible API reports how many input, output, and cached tokens were processed during that time. The harness fits `a`, `b`, and `c` so that those token counts explain the measured serving time. The token multipliers are then ratios of those fitted time coefficients. Monetary or accounting cost is optional and is applied only after the time model has been measured.**
+> **AIPerf measures time. The harness discounts half of any grace-period tail to obtain resource time `T`, while the OpenAI-compatible API reports how many input, output, and cached tokens were processed. The harness fits `a`, `b`, and `c` so those token counts explain the drain-adjusted resource time. The token multipliers are then ratios of those fitted time coefficients. Monetary or accounting cost is optional and is applied only after the time model has been measured.**
 
 In short:
 

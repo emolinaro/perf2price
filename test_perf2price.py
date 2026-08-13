@@ -335,8 +335,9 @@ summary = {{
                 osl=100,
             )
 
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
-                io.StringIO()
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
             ):
                 result = fit.main(["perf2price_fit.py", str(root), "0", "0", ""])
 
@@ -366,12 +367,11 @@ summary = {{
                 osl=100,
             )
 
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
-                io.StringIO()
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
             ):
-                result = fit.main(
-                    ["perf2price_fit.py", str(root), "0", "0", "100"]
-                )
+                result = fit.main(["perf2price_fit.py", str(root), "0", "0", "100"])
 
             self.assertEqual(result, 0)
             pricing = json.loads((root / "pricing_fit.json").read_text())

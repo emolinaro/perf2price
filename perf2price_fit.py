@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Parse AIPerf runs, select capacity points, and fit the token-cost model.
 
-Resource time for the regression is the requested profiling window, plus half
-of any grace-period drain:
+Resource time for the regression is the measured benchmark span, with half of
+any grace-period drain discounted:
 
-    T = requested_duration + 0.5 * max(0, benchmark_duration - requested)
+    T = benchmark_duration - 0.5 * max(0, benchmark_duration - requested)
 
 Coefficients are estimated in rate space (equal weight per selected profile):
 
@@ -108,7 +108,11 @@ def total_metric(data, name, prefer_sum=True):
     if raw is not None:
         return raw
     if isinstance(value, dict):
-        keys = ("sum", "total", "value", "avg") if prefer_sum else ("value", "avg", "sum", "total")
+        keys = (
+            ("sum", "total", "value", "avg")
+            if prefer_sum
+            else ("value", "avg", "sum", "total")
+        )
         for key in keys:
             raw = _as_float(value.get(key))
             if raw is not None:
@@ -147,7 +151,9 @@ def _read_summary(path):
     try:
         data = json.loads(path.read_text())
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        print(f"WARNING: cannot read AIPerf summary JSON {path}: {exc}", file=sys.stderr)
+        print(
+            f"WARNING: cannot read AIPerf summary JSON {path}: {exc}", file=sys.stderr
+        )
         return None
     if not isinstance(data, dict):
         print(f"WARNING: AIPerf summary JSON is not an object: {path}", file=sys.stderr)
@@ -228,7 +234,9 @@ def parse_rows(root):
         ctx = json.loads(ctx_path.read_text())
         summary_path, data = load_summary(ctx_path.parent)
         if data is None:
-            print(f"WARNING: no AIPerf summary JSON in {ctx_path.parent}", file=sys.stderr)
+            print(
+                f"WARNING: no AIPerf summary JSON in {ctx_path.parent}", file=sys.stderr
+            )
             continue
 
         prompt = total_metric(data, "total_usage_prompt_tokens")
@@ -306,7 +314,11 @@ def parse_rows(root):
             "aiperf_ok": ctx.get("aiperf_ok"),
         }
 
-        t_for_rate = resource_seconds if finite(resource_seconds) and resource_seconds > 0 else None
+        t_for_rate = (
+            resource_seconds
+            if finite(resource_seconds) and resource_seconds > 0
+            else None
+        )
         if t_for_rate and usage_ok:
             row["api_prompt_tps"] = prompt / t_for_rate
             row["api_completion_tps"] = completion / t_for_rate
@@ -322,7 +334,11 @@ def parse_rows(root):
 
 def annotate_plateau(candidates, chosen, ttft_limit, itl_limit):
     max_tested = max(r["concurrency"] for r in candidates)
-    chosen_tput = chosen["request_throughput_rps"] if finite(chosen["request_throughput_rps"]) else None
+    chosen_tput = (
+        chosen["request_throughput_rps"]
+        if finite(chosen["request_throughput_rps"])
+        else None
+    )
     with_tput = [r for r in candidates if finite(r["request_throughput_rps"])]
     global_best = max((r["request_throughput_rps"] for r in with_tput), default=None)
 
@@ -368,11 +384,7 @@ def select_capacity_points(rows, ttft_limit, itl_limit):
             and (r.get("error_request_count") or 0) == 0
             and r["usage_ok"]
         ]
-        feasible = [
-            r
-            for r in usable
-            if meets_slo(r, ttft_limit, itl_limit)
-        ]
+        feasible = [r for r in usable if meets_slo(r, ttft_limit, itl_limit)]
         if not feasible:
             print(
                 f"WARNING: no error-free/SLO-feasible/API-usage-valid run for profile '{profile}'",
@@ -381,7 +393,9 @@ def select_capacity_points(rows, ttft_limit, itl_limit):
             continue
         feasible.sort(
             key=lambda r: (
-                r["request_throughput_rps"] if finite(r["request_throughput_rps"]) else -1,
+                r["request_throughput_rps"]
+                if finite(r["request_throughput_rps"])
+                else -1,
                 r["concurrency"],
             )
         )
@@ -628,7 +642,7 @@ def main(argv):
     mean_y = float(np.mean(y))
     rel_rmse = rmse / mean_y if mean_y else None
     rate_resid = 1.0 - (pred / y)
-    rate_rmse = float(np.sqrt(np.mean(rate_resid ** 2)))
+    rate_rmse = float(np.sqrt(np.mean(rate_resid**2)))
     coeff = dict(zip(names, [float(v) for v in beta]))
     a = coeff.get("noncached_input", 0.0)
     b = coeff.get("output", 0.0)
@@ -786,7 +800,9 @@ def _print_report(root, fit_result):
         else:
             print(f"  outputMultiplier = {m['outputMultiplier']:.6g}")
         if m["cachedMultiplier"] is None:
-            print("  cachedMultiplier = not available (cache tokens not reported/identified)")
+            print(
+                "  cachedMultiplier = not available (cache tokens not reported/identified)"
+            )
         else:
             cache_ci = ci.get("cachedMultiplier")
             if cache_ci:
@@ -821,14 +837,20 @@ def _print_report(root, fit_result):
         if fit.get("condition_number") is not None:
             print(f"Design-matrix condition number: {fit['condition_number']:.4g}")
         if fit["relative_rmse"] > 0.15:
-            print("WARNING: fit error > 15%; the additive token-cost model may be too simple")
-            print("         for these workload points. Inspect summary.csv before billing.")
+            print(
+                "WARNING: fit error > 15%; the additive token-cost model may be too simple"
+            )
+            print(
+                "         for these workload points. Inspect summary.csv before billing."
+            )
     if "fit_error" in fit_result:
         print()
         print("Fit warning:", fit_result["fit_error"])
 
     print()
-    print("Note: these are deployment-capacity coefficients, not external provider prices.")
+    print(
+        "Note: these are deployment-capacity coefficients, not external provider prices."
+    )
 
 
 if __name__ == "__main__":
