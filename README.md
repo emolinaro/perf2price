@@ -220,15 +220,17 @@ For every benchmark run, AIPerf reports a measured benchmark duration.
 Call this value:
 
 $$
-T_j
+T_{measured,j}
 $$
 
-The harness does not assume that every run lasts exactly the requested duration. It starts from the actual duration recorded by AIPerf, then converts that span into drain-adjusted resource seconds `T` so a long decode cooldown is not treated as fully busy time.
+The harness does not assume that every run lasts exactly the requested duration. It starts from the actual duration recorded by AIPerf, then converts that span into drain-adjusted resource seconds `T_j` so a long decode cooldown is not treated as fully busy time.
 
 For example, a run might produce:
 
 ```text
+requested duration       = 300.0 seconds
 AIPerf measured duration = 301.4 seconds
+drain-adjusted T         = 300.7 seconds
 
 non-cached input tokens = 31.2 million
 output tokens           = 1.8 million
@@ -238,7 +240,7 @@ cached input tokens     = 0
 That one observation gives the per-token equation:
 
 $$
-31.2 \times 10^6 a + 1.8 \times 10^6 b + 0c \approx 301.4
+31.2 \times 10^6 a + 1.8 \times 10^6 b + 0c \approx 300.7
 $$
 
 where the coefficients are measured in **seconds per token**. The corresponding seconds-per-MTok coefficients are `a_M = a × 10^6`, `b_M = b × 10^6`, and `c_M = c × 10^6`.
@@ -246,7 +248,9 @@ where the coefficients are measured in **seconds per token**. The corresponding 
 Another decode-heavy run might produce:
 
 ```text
+requested duration       = 300.0 seconds
 AIPerf measured duration = 302.1 seconds
+drain-adjusted T         = 301.05 seconds
 
 non-cached input tokens = 4.1 million
 output tokens           = 8.4 million
@@ -256,13 +260,15 @@ cached input tokens     = 0
 which gives:
 
 $$
-4.1 \times 10^6 a + 8.4 \times 10^6 b + 0c \approx 302.1
+4.1 \times 10^6 a + 8.4 \times 10^6 b + 0c \approx 301.05
 $$
 
 A cache-heavy run might produce:
 
 ```text
+requested duration       = 300.0 seconds
 AIPerf measured duration = 300.8 seconds
+drain-adjusted T         = 300.4 seconds
 
 non-cached input tokens = 3.2 million
 output tokens           = 2.0 million
@@ -272,7 +278,7 @@ cached input tokens     = 47.5 million
 which gives:
 
 $$
-3.2 \times 10^6 a + 2.0 \times 10^6 b + 47.5 \times 10^6 c \approx 300.8
+3.2 \times 10^6 a + 2.0 \times 10^6 b + 47.5 \times 10^6 c \approx 300.4
 $$
 
 These are the actual equations used to infer how much serving time each type of token consumes.
@@ -389,6 +395,8 @@ $$
 This is a non-negative least-squares regression in which each selected workload votes equally, rather than letting a 16k-token run dominate a 1k-token run.
 
 The regression chooses `a`, `b`, and `c` so that the predicted resource seconds are as close as possible to the drain-adjusted durations. Cache-plan rows are used only when the endpoint reports cached tokens; otherwise they are excluded so unreported cache hits cannot pull the input coefficient down. Rows whose actual completions are less than half the requested OSL are also excluded from the fit.
+
+Before solving, the harness scales each token-rate column to unit norm and requires the design-matrix condition number to be at most 10,000. This unit-independent limit rejects workload mixes whose token ratios are too similar to identify stable coefficients, including unstable bootstrap resamples.
 
 ### Why the workloads are different
 

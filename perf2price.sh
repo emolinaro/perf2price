@@ -553,10 +553,14 @@ try:
                 saw_usage = True
 except urllib.error.HTTPError as exc:
     body = redact_api_key(exc.read().decode(errors="replace"))
-    print(f"  WARNING: streamed probe returned HTTP {exc.code}: {body[:400]}")
-    print("           The server may reject stream_options/include_usage.")
+    print(f"  ERROR: streamed probe returned HTTP {exc.code}: {body[:400]}", file=sys.stderr)
+    print("         The server may reject stream_options/include_usage.", file=sys.stderr)
+    print("         Use --skip-probe only if this endpoint was already verified.", file=sys.stderr)
+    raise SystemExit(1)
 except Exception as exc:
-    print(f"  WARNING: streamed probe failed: {redact_api_key(exc)}")
+    print(f"  ERROR: streamed probe failed: {redact_api_key(exc)}", file=sys.stderr)
+    print("         Use --skip-probe only if this endpoint was already verified.", file=sys.stderr)
+    raise SystemExit(1)
 else:
     if saw_usage:
         print("  streamed usage: present (stream_options.include_usage honored)")

@@ -24,6 +24,7 @@ PLATEAU_REL = 0.05
 OSL_RATIO_MIN = 0.5
 BOOTSTRAP_SAMPLES = 400
 ZERO_COEF_EPS = 1e-18
+MAX_CONDITION_NUMBER = 10_000.0
 
 SUMMARY_COLUMNS = [
     "profile",
@@ -431,16 +432,28 @@ def nnls_enumerate(X, y):
     """Non-negative least squares via subset OLS, fitted in rate space.
 
     Minimizes ||1 - (X / y) β||² subject to β ≥ 0. Each row is weighted
-    equally regardless of token volume. Returns β in seconds/token.
+    equally regardless of token volume. Returns β in seconds/token, active
+    columns, and the column-scaled design-matrix condition number.
     """
     import numpy as np
 
     t = y.reshape(-1, 1)
     X_rate = X / t
+    if not np.all(np.isfinite(X_rate)):
+        return None
+    column_norms = np.linalg.norm(X_rate, axis=0)
+    if np.any(~np.isfinite(column_norms)) or np.any(column_norms <= 0):
+        return None
+    X_rate_scaled = X_rate / column_norms
+    condition_number = float(np.linalg.cond(X_rate_scaled))
     y_rate = np.ones(len(y))
     best = None
     p = X_rate.shape[1]
-    if np.linalg.matrix_rank(X_rate) < p:
+    if (
+        np.linalg.matrix_rank(X_rate_scaled) < p
+        or not np.isfinite(condition_number)
+        or condition_number > MAX_CONDITION_NUMBER
+    ):
         return None
     for mask in range(1, 1 << p):
         cols = [i for i in range(p) if mask & (1 << i)]
@@ -456,7 +469,7 @@ def nnls_enumerate(X, y):
             best = (rss, beta, cols)
     if best is None:
         return None
-    return best[1], best[2]
+    return best[1], best[2], condition_number
 
 
 def bootstrap_multipliers(X, y, names, n_boot, seed):
@@ -470,7 +483,7 @@ def bootstrap_multipliers(X, y, names, n_boot, seed):
         fitted = nnls_enumerate(X[idx], y[idx])
         if fitted is None:
             continue
-        beta, _ = fitted
+        beta, _, _ = fitted
         coeff = dict(zip(names, beta))
         a = float(coeff.get("noncached_input", 0.0))
         if a <= ZERO_COEF_EPS:
@@ -604,23 +617,18 @@ def main(argv):
 
     fitted = nnls_enumerate(X, y)
     if fitted is None:
-        fit_result["fit_error"] = "no non-negative coefficient solution found"
+        fit_result["fit_error"] = "no stable non-negative coefficient solution found"
         (root / "pricing_fit.json").write_text(json.dumps(fit_result, indent=2) + "\n")
         _print_report(root, fit_result)
         return 0
 
-    beta, active_cols = fitted
+    beta, _, cond = fitted
     pred = X @ beta
     rmse = float(np.sqrt(np.mean((y - pred) ** 2)))
     mean_y = float(np.mean(y))
     rel_rmse = rmse / mean_y if mean_y else None
     rate_resid = 1.0 - (pred / y)
     rate_rmse = float(np.sqrt(np.mean(rate_resid ** 2)))
-    try:
-        cond = float(np.linalg.cond(X[:, active_cols] / y.reshape(-1, 1)))
-    except Exception:
-        cond = None
-
     coeff = dict(zip(names, [float(v) for v in beta]))
     a = coeff.get("noncached_input", 0.0)
     b = coeff.get("output", 0.0)
@@ -691,6 +699,7 @@ def main(argv):
         "rmse_seconds": rmse,
         "rate_rmse": rate_rmse,
         "condition_number": cond,
+        "condition_number_max": MAX_CONDITION_NUMBER,
         "rows_used": len(fit_rows),
         "cache_coefficient_fitted": have_cache,
         "cache_coefficient_identified": cache_identified,

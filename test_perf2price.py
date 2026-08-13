@@ -1,4 +1,5 @@
 import contextlib
+import http.server
 import io
 import json
 import os
@@ -6,6 +7,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 import numpy as np
@@ -159,6 +161,108 @@ summary = {
             self.assertEqual([row["profile"] for row in rows], ["good"])
             self.assertIn("profile_export_aiperf.json", stderr.getvalue())
 
+    def test_streaming_probe_http_error_stops_before_benchmark(self):
+        class ProbeHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def write_json(self, status, payload):
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                self.write_json(200, {"data": [{"id": "test-model"}]})
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length))
+                if payload.get("stream"):
+                    self.write_json(400, {"error": "include_usage unsupported"})
+                else:
+                    self.write_json(
+                        200,
+                        {
+                            "usage": {
+                                "prompt_tokens": 8,
+                                "completion_tokens": 2,
+                            }
+                        },
+                    )
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ProbeHandler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp = pathlib.Path(temp_dir)
+                marker = temp / "benchmark-started"
+                fake_aiperf = temp / "aiperf"
+                fake_aiperf.write_text(
+                    f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+if "--version" in sys.argv:
+    print("aiperf 0.12.0")
+    raise SystemExit(0)
+
+pathlib.Path({str(marker)!r}).write_text("started")
+artifact_dir = pathlib.Path(sys.argv[sys.argv.index("--artifact-dir") + 1])
+summary = {{
+    "benchmark_duration": 1,
+    "total_usage_prompt_tokens": 128,
+    "total_usage_completion_tokens": 16,
+    "request_count": 1,
+    "request_throughput": 1,
+    "error_summary": [],
+}}
+(artifact_dir / "profile_export_aiperf.json").write_text(json.dumps(summary))
+"""
+                )
+                fake_aiperf.chmod(0o755)
+                plan = temp / "plan.csv"
+                plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
+                env = os.environ.copy()
+                env.pop("OPENAI_API_KEY", None)
+                env["AIPERF_BIN"] = str(fake_aiperf)
+                env["PYTHON_BIN"] = sys.executable
+                result = subprocess.run(
+                    [
+                        "bash",
+                        str(pathlib.Path(__file__).with_name("perf2price.sh")),
+                        "--url",
+                        f"http://127.0.0.1:{server.server_port}",
+                        "--model",
+                        "test-model",
+                        "--concurrency",
+                        "1",
+                        "--duration",
+                        "1",
+                        "--grace-period",
+                        "0",
+                        "--plan",
+                        str(plan),
+                        "--out-dir",
+                        str(temp / "output"),
+                    ],
+                    cwd=pathlib.Path(__file__).parent,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("streamed probe returned HTTP 400", result.stderr)
+                self.assertFalse(marker.exists())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_cached_tokens_above_prompt_are_ineligible_and_preserved(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
@@ -280,6 +384,19 @@ summary = {
     def test_nnls_requires_full_column_rank(self):
         X = np.asarray([[1.0, 2.0], [2.0, 4.0], [3.0, 6.0]])
         y = np.asarray([1.0, 2.0, 3.0])
+
+        self.assertIsNone(fit.nnls_enumerate(X, y))
+
+    def test_nnls_rejects_ill_conditioned_workload_ratios(self):
+        X = np.asarray(
+            [
+                [100.0, 100.0],
+                [200.0, 200.01],
+                [300.0, 300.03],
+                [400.0, 400.06],
+            ]
+        )
+        y = X @ np.asarray([0.04, 0.06])
 
         self.assertIsNone(fit.nnls_enumerate(X, y))
 
