@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import tempfile
 import unittest
@@ -191,6 +192,17 @@ class RunStateTests(unittest.TestCase):
             "aiperf_not_successful",
         )
 
+    def test_classify_point_treats_broken_directory_symlink_as_retryable(self):
+        row = run_state.PlanRow("single", 128, 16, 0)
+        point = self.root / "runs" / "single" / "c1"
+        point.parent.mkdir(parents=True)
+        point.symlink_to(self.root / "missing", target_is_directory=True)
+
+        self.assertEqual(
+            run_state.classify_point(self.root, row, 1, 10),
+            run_state.PointStatus("retryable", "directory_invalid"),
+        )
+
     def test_classify_point_retries_every_metadata_mismatch(self):
         row = run_state.PlanRow("single", 128, 16, 4)
         point = self.point(row, concurrency=2)
@@ -245,6 +257,135 @@ class RunStateTests(unittest.TestCase):
         self.assertEqual(
             run_state.classify_point(self.root, row, 1, 10).reason,
             "summary_missing_or_invalid",
+        )
+
+    def test_archive_point_preserves_distinct_attempts_outside_runs(self):
+        point = self.root / "runs" / "single" / "c1"
+        point.mkdir(parents=True)
+        (point / "partial.log").write_text("first")
+
+        first = run_state.archive_point(
+            self.root, "single", 1, "missing_summary", now_ns=123, pid=456
+        )
+
+        self.assertFalse(point.exists())
+        self.assertEqual((first / "partial.log").read_text(), "first")
+        self.assertTrue(
+            str(first.relative_to(self.root)).startswith("resume_backups/single/c1/")
+        )
+
+        point.mkdir(parents=True)
+        (point / "partial.log").write_text("second")
+        second = run_state.archive_point(
+            self.root, "single", 1, "context invalid", now_ns=124, pid=456
+        )
+
+        self.assertNotEqual(first, second)
+        self.assertEqual((first / "partial.log").read_text(), "first")
+        self.assertEqual((second / "partial.log").read_text(), "second")
+
+    def test_archive_point_handles_missing_and_rejects_unsafe_targets(self):
+        self.assertIsNone(
+            run_state.archive_point(self.root, "single", 1, "not_started")
+        )
+        with self.assertRaises(run_state.RunStateError):
+            run_state.archive_point(self.root, "../escape", 1, "invalid")
+        with self.assertRaisesRegex(run_state.RunStateError, "concurrency"):
+            run_state.archive_point(self.root, "single", 0, "invalid")
+
+    def test_lock_reclaims_only_stale_local_owner(self):
+        run_state.acquire_lock(
+            self.root,
+            100,
+            hostname="host",
+            is_alive=lambda _: False,
+            now_ns=1,
+        )
+        with self.assertRaisesRegex(run_state.RunStateError, "PID 100"):
+            run_state.acquire_lock(
+                self.root,
+                200,
+                hostname="host",
+                is_alive=lambda _: True,
+                now_ns=2,
+            )
+
+        run_state.acquire_lock(
+            self.root,
+            200,
+            hostname="host",
+            is_alive=lambda _: False,
+            now_ns=3,
+        )
+
+        owner = json.loads(
+            (self.root / ".perf2price.lock" / "owner.json").read_text()
+        )
+        self.assertEqual(owner["pid"], 200)
+        stale = list((self.root / "resume_backups" / "locks").iterdir())
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(
+            json.loads((stale[0] / "owner.json").read_text())["pid"], 100
+        )
+
+        with self.assertRaisesRegex(run_state.RunStateError, "owned by"):
+            run_state.release_lock(self.root, 201, hostname="host")
+        run_state.release_lock(self.root, 200, hostname="host")
+        self.assertFalse((self.root / ".perf2price.lock").exists())
+
+    def test_lock_never_reclaims_foreign_host(self):
+        run_state.acquire_lock(
+            self.root,
+            os.getpid(),
+            hostname="host-a",
+            is_alive=lambda _: True,
+            now_ns=1,
+        )
+
+        with self.assertRaisesRegex(run_state.RunStateError, "host-a"):
+            run_state.acquire_lock(
+                self.root,
+                200,
+                hostname="host-b",
+                is_alive=lambda _: False,
+                now_ns=2,
+            )
+
+    def test_lock_reclaims_malformed_owner_as_stale(self):
+        lock = self.root / ".perf2price.lock"
+        lock.mkdir()
+        (lock / "owner.json").write_text("{")
+
+        run_state.acquire_lock(
+            self.root,
+            200,
+            hostname="host",
+            is_alive=lambda _: False,
+            now_ns=2,
+        )
+
+        owner = json.loads((lock / "owner.json").read_text())
+        self.assertEqual(owner["pid"], 200)
+        self.assertTrue((self.root / "resume_backups" / "locks").is_dir())
+
+    def test_lock_preserves_empty_existing_lock_directory(self):
+        lock = self.root / ".perf2price.lock"
+        lock.mkdir()
+
+        run_state.acquire_lock(
+            self.root,
+            200,
+            hostname="host",
+            is_alive=lambda _: False,
+            now_ns=2,
+        )
+
+        backups = list((self.root / "resume_backups" / "locks").iterdir())
+        self.assertEqual(len(backups), 1)
+        self.assertTrue(backups[0].is_dir())
+        self.assertEqual(
+            json.loads((lock / "owner.json").read_text())["pid"],
+            200,
         )
 
 

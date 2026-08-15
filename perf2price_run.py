@@ -6,16 +6,20 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import datetime
+import errno
 import io
 import json
 import math
 import os
 import pathlib
 import re
+import socket
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 import perf2price_fit
 
@@ -325,7 +329,7 @@ def classify_point(
     duration: float,
 ) -> PointStatus:
     point = pathlib.Path(root) / "runs" / row.name / f"c{concurrency}"
-    if not point.exists():
+    if not os.path.lexists(point):
         return PointStatus("not_started", "directory_missing")
     if not point.is_dir():
         return PointStatus("retryable", "directory_invalid")
@@ -373,6 +377,198 @@ def classify_point(
     if summary is None:
         return PointStatus("retryable", "summary_missing_or_invalid")
     return PointStatus("complete", "success")
+
+
+def _unique_destination(path: pathlib.Path) -> pathlib.Path:
+    if not os.path.lexists(path):
+        return path
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{path.name}-{counter}")
+        if not os.path.lexists(candidate):
+            return candidate
+        counter += 1
+
+
+def archive_point(
+    root: pathlib.Path,
+    profile: str,
+    concurrency: int,
+    reason: str,
+    *,
+    now_ns: int | None = None,
+    pid: int | None = None,
+) -> pathlib.Path | None:
+    validate_profile_name(profile)
+    if not _is_int(concurrency) or concurrency <= 0:
+        raise RunStateError("concurrency must be a positive integer")
+    root = pathlib.Path(root)
+    source = root / "runs" / profile / f"c{concurrency}"
+    if not os.path.lexists(source):
+        return None
+    stamp = time.time_ns() if now_ns is None else now_ns
+    owner = os.getpid() if pid is None else pid
+    safe_reason = re.sub(r"[^A-Za-z0-9._-]", "_", reason).strip("_")
+    safe_reason = safe_reason or "unknown"
+    target = root / "resume_backups" / profile / f"c{concurrency}" / (
+        f"attempt-{stamp}-{owner}-{safe_reason}"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target = _unique_destination(target)
+    try:
+        os.replace(source, target)
+    except OSError as exc:
+        raise RunStateError(
+            f"cannot preserve retryable point {source} at {target}: {exc}"
+        ) from exc
+    return target
+
+
+def process_is_alive(pid: int) -> bool:
+    if not _is_int(pid) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _lock_owner(lock: pathlib.Path) -> dict | None:
+    try:
+        owner = json.loads((lock / "owner.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(owner, dict):
+        return None
+    if not _is_int(owner.get("pid")) or owner["pid"] <= 0:
+        return None
+    if not isinstance(owner.get("hostname"), str) or not owner["hostname"]:
+        return None
+    if not isinstance(owner.get("acquired_at"), str):
+        return None
+    return owner
+
+
+def _discard_candidate(candidate: pathlib.Path) -> None:
+    if not candidate.exists():
+        return
+    owner = candidate / "owner.json"
+    if owner.exists():
+        owner.unlink()
+    candidate.rmdir()
+
+
+def _install_lock(lock: pathlib.Path, candidate: pathlib.Path) -> bool:
+    if os.path.lexists(lock):
+        return False
+    try:
+        os.rename(candidate, lock)
+    except OSError as exc:
+        if exc.errno in {errno.EEXIST, errno.ENOTEMPTY}:
+            return False
+        raise
+    return True
+
+
+def acquire_lock(
+    root: pathlib.Path,
+    owner_pid: int,
+    *,
+    hostname: str | None = None,
+    is_alive: Callable[[int], bool] = process_is_alive,
+    now_ns: int | None = None,
+) -> pathlib.Path:
+    if not _is_int(owner_pid) or owner_pid <= 0:
+        raise RunStateError("lock owner PID must be a positive integer")
+    root = pathlib.Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    host = hostname or socket.gethostname()
+    stamp = time.time_ns() if now_ns is None else now_ns
+    lock = root / ".perf2price.lock"
+
+    for attempt in range(5):
+        candidate = root / f".perf2price.lock.candidate-{owner_pid}-{stamp}-{attempt}"
+        try:
+            candidate.mkdir()
+            atomic_write_json(
+                candidate / "owner.json",
+                {
+                    "pid": owner_pid,
+                    "hostname": host,
+                    "acquired_at": datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(),
+                },
+            )
+            if _install_lock(lock, candidate):
+                return lock
+        except OSError as exc:
+            raise RunStateError(f"cannot acquire run lock {lock}: {exc}") from exc
+        finally:
+            try:
+                _discard_candidate(candidate)
+            except OSError:
+                pass
+
+        existing = _lock_owner(lock)
+        if existing is not None:
+            if existing["hostname"] != host:
+                raise RunStateError(
+                    f"run is locked by PID {existing['pid']} on host "
+                    f"{existing['hostname']}"
+                )
+            if is_alive(existing["pid"]):
+                raise RunStateError(
+                    f"run is locked by live PID {existing['pid']} on host {host}"
+                )
+            stale_owner = existing["pid"]
+        else:
+            stale_owner = "unknown"
+
+        backup = _unique_destination(
+            root
+            / "resume_backups"
+            / "locks"
+            / f"stale-{stamp}-{stale_owner}"
+        )
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.rename(lock, backup)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RunStateError(
+                f"cannot preserve stale run lock {lock} at {backup}: {exc}"
+            ) from exc
+    raise RunStateError(f"could not acquire run lock after repeated races: {lock}")
+
+
+def release_lock(
+    root: pathlib.Path,
+    owner_pid: int,
+    *,
+    hostname: str | None = None,
+) -> None:
+    root = pathlib.Path(root)
+    lock = root / ".perf2price.lock"
+    if not lock.exists():
+        return
+    host = hostname or socket.gethostname()
+    owner = _lock_owner(lock)
+    if owner is None:
+        raise RunStateError(f"cannot release malformed run lock: {lock}")
+    if owner["pid"] != owner_pid or owner["hostname"] != host:
+        raise RunStateError(
+            f"run lock is owned by PID {owner['pid']} on host {owner['hostname']}"
+        )
+    try:
+        (lock / "owner.json").unlink()
+        lock.rmdir()
+    except OSError as exc:
+        raise RunStateError(f"cannot release run lock {lock}: {exc}") from exc
 
 
 def _flag(value: str, name: str) -> bool:
@@ -485,6 +681,20 @@ def _parser() -> argparse.ArgumentParser:
     finish_context.add_argument("path")
     finish_context.add_argument("exit_code", type=int)
 
+    archive = commands.add_parser("archive-point")
+    archive.add_argument("root")
+    archive.add_argument("profile")
+    archive.add_argument("concurrency", type=int)
+    archive.add_argument("reason")
+
+    acquire = commands.add_parser("acquire-lock")
+    acquire.add_argument("root")
+    acquire.add_argument("owner_pid", type=int)
+
+    release = commands.add_parser("release-lock")
+    release.add_argument("root")
+    release.add_argument("owner_pid", type=int)
+
     write_config = commands.add_parser("write-config")
     config_args = (
         "path",
@@ -538,6 +748,18 @@ def main(argv=None) -> int:
             )
         elif values.command == "finish-context":
             finish_run_context(pathlib.Path(values.path), values.exit_code)
+        elif values.command == "archive-point":
+            backup = archive_point(
+                pathlib.Path(values.root),
+                values.profile,
+                values.concurrency,
+                values.reason,
+            )
+            print(backup or "")
+        elif values.command == "acquire-lock":
+            acquire_lock(pathlib.Path(values.root), values.owner_pid)
+        elif values.command == "release-lock":
+            release_lock(pathlib.Path(values.root), values.owner_pid)
         elif values.command == "write-config":
             _write_config_from_args(values)
         else:
