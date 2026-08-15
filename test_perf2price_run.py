@@ -1,0 +1,252 @@
+import json
+import pathlib
+import tempfile
+import unittest
+
+import perf2price_run as run_state
+
+
+class RunStateTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = pathlib.Path(self.temp_dir.name)
+
+    @staticmethod
+    def valid_config():
+        return {
+            "url": "http://localhost:8000",
+            "endpoint": "/v1/chat/completions",
+            "models_endpoint": "/v1/models",
+            "model": "test-model",
+            "tokenizer": "test-tokenizer",
+            "tokenizer_revision": None,
+            "tokenizer_trust_remote_code": False,
+            "apply_chat_template": False,
+            "legacy_max_tokens": False,
+            "run_cache_tests": True,
+            "skip_probe": True,
+            "max_context": 0,
+            "plan_file": None,
+            "concurrency_list": "1,2",
+            "duration_seconds": 10,
+            "grace_period": "0",
+            "ttft_p99_ms": 0,
+            "itl_p99_ms": 0,
+            "resource_hour_cost_usd": None,
+            "random_seed": 100,
+            "num_dataset_entries": 128,
+            "aiperf_version": "0.12.0",
+            "extra_aiperf_args": [],
+        }
+
+    def write_plan(self, body):
+        path = self.root / "benchmark_plan.csv"
+        path.write_text("name,isl,osl,prefix_tokens\n" + body)
+        return path
+
+    def write_config(self, config=None):
+        path = self.root / "run_config.json"
+        path.write_text(json.dumps(config or self.valid_config()))
+        return path
+
+    def point(self, row, concurrency=1):
+        point = self.root / "runs" / row.name / f"c{concurrency}"
+        point.mkdir(parents=True)
+        return point
+
+    def test_load_plan_accepts_comments_and_trimmed_rows(self):
+        path = self.write_plan("# comment\n first , 128 , 16 , 0 \n\nsecond,0,0,4")
+
+        self.assertEqual(
+            run_state.load_plan(path),
+            [
+                run_state.PlanRow("first", 128, 16, 0),
+                run_state.PlanRow("second", 0, 0, 4),
+            ],
+        )
+
+    def test_plan_rejects_unsafe_profile_name(self):
+        path = self.write_plan("../escape,128,16,0\n")
+
+        with self.assertRaisesRegex(run_state.RunStateError, "profile name"):
+            run_state.load_plan(path)
+
+    def test_plan_rejects_duplicates_invalid_numbers_and_empty_data(self):
+        cases = {
+            "duplicate": "same,1,2,3\nsame,4,5,6\n",
+            "negative": "single,-1,2,3\n",
+            "not_integer": "single,one,2,3\n",
+            "wrong_columns": "single,1,2\n",
+            "empty": "# only a comment\n",
+        }
+        for name, body in cases.items():
+            with self.subTest(name=name):
+                path = self.write_plan(body)
+                with self.assertRaises(run_state.RunStateError):
+                    run_state.load_plan(path)
+
+    def test_old_config_defaults_new_metadata(self):
+        self.write_config()
+
+        config = run_state.load_run_config(self.root)
+
+        self.assertEqual(config["config_schema_version"], 0)
+        self.assertIsNone(config["api_key_required"])
+
+    def test_config_rejects_unknown_schema_version(self):
+        config = self.valid_config()
+        config["config_schema_version"] = 2
+        config["api_key_required"] = False
+        self.write_config(config)
+
+        with self.assertRaisesRegex(run_state.RunStateError, "schema version"):
+            run_state.load_run_config(self.root)
+
+    def test_config_rejects_malformed_missing_and_wrong_typed_fields(self):
+        path = self.root / "run_config.json"
+        path.write_text("[]")
+        with self.assertRaisesRegex(run_state.RunStateError, "JSON object"):
+            run_state.load_run_config(self.root)
+
+        config = self.valid_config()
+        del config["model"]
+        self.write_config(config)
+        with self.assertRaisesRegex(run_state.RunStateError, "missing.*model"):
+            run_state.load_run_config(self.root)
+
+        config = self.valid_config()
+        config["skip_probe"] = 1
+        self.write_config(config)
+        with self.assertRaisesRegex(run_state.RunStateError, "skip_probe"):
+            run_state.load_run_config(self.root)
+
+        config = self.valid_config()
+        config["extra_aiperf_args"] = ["--flag", 1]
+        self.write_config(config)
+        with self.assertRaisesRegex(run_state.RunStateError, "extra_aiperf_args"):
+            run_state.load_run_config(self.root)
+
+    def test_write_run_config_is_atomic_and_validated(self):
+        config = self.valid_config()
+        config["config_schema_version"] = 1
+        config["api_key_required"] = False
+
+        run_state.write_run_config(self.root / "run_config.json", config)
+
+        self.assertEqual(run_state.load_run_config(self.root), config)
+        self.assertEqual(list(self.root.glob(".run_config.json.*")), [])
+
+    def test_classify_point_requires_success_and_readable_summary(self):
+        row = run_state.PlanRow("single", 128, 16, 0)
+        self.assertEqual(
+            run_state.classify_point(self.root, row, 1, 10),
+            run_state.PointStatus("not_started", "directory_missing"),
+        )
+
+        point = self.point(row)
+        context_path = point / "run_context.json"
+        run_state.write_run_context(context_path, row, 1, 10)
+        self.assertEqual(
+            run_state.classify_point(self.root, row, 1, 10),
+            run_state.PointStatus("retryable", "aiperf_not_successful"),
+        )
+
+        run_state.finish_run_context(context_path, 0)
+        self.assertEqual(
+            run_state.classify_point(self.root, row, 1, 10),
+            run_state.PointStatus("retryable", "summary_missing_or_invalid"),
+        )
+
+        (point / "profile_export_aiperf.json").write_text("{}")
+        self.assertEqual(
+            run_state.classify_point(self.root, row, 1, 10),
+            run_state.PointStatus("complete", "success"),
+        )
+
+    def test_classify_point_retries_bad_context_and_failed_aiperf(self):
+        row = run_state.PlanRow("single", 128, 16, 0)
+        point = self.point(row)
+        context_path = point / "run_context.json"
+
+        self.assertEqual(
+            run_state.classify_point(self.root, row, 1, 10).reason,
+            "context_missing",
+        )
+        context_path.write_text("{")
+        self.assertEqual(
+            run_state.classify_point(self.root, row, 1, 10).reason,
+            "context_invalid",
+        )
+        context_path.write_text("[]")
+        self.assertEqual(
+            run_state.classify_point(self.root, row, 1, 10).reason,
+            "context_invalid",
+        )
+        run_state.write_run_context(context_path, row, 1, 10)
+        run_state.finish_run_context(context_path, 2)
+        (point / "profile_export_aiperf.json").write_text("{}")
+        self.assertEqual(
+            run_state.classify_point(self.root, row, 1, 10).reason,
+            "aiperf_not_successful",
+        )
+
+    def test_classify_point_retries_every_metadata_mismatch(self):
+        row = run_state.PlanRow("single", 128, 16, 4)
+        point = self.point(row, concurrency=2)
+        context_path = point / "run_context.json"
+        run_state.write_run_context(context_path, row, 2, 10)
+        run_state.finish_run_context(context_path, 0)
+        (point / "profile_export_aiperf.json").write_text("{}")
+
+        context = json.loads(context_path.read_text())
+        changes = {
+            "profile": "other",
+            "isl": 129,
+            "osl": 17,
+            "prefix_tokens": 5,
+            "concurrency": 3,
+            "requested_duration_seconds": 10.1,
+        }
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                changed = dict(context)
+                changed[field] = value
+                context_path.write_text(json.dumps(changed))
+                self.assertEqual(
+                    run_state.classify_point(self.root, row, 2, 10).reason,
+                    f"metadata_mismatch_{field}",
+                )
+
+    def test_classify_point_rejects_boolean_integer_metadata(self):
+        row = run_state.PlanRow("single", 128, 16, 0)
+        point = self.point(row)
+        context_path = point / "run_context.json"
+        run_state.write_run_context(context_path, row, 1, 10)
+        run_state.finish_run_context(context_path, 0)
+        context = json.loads(context_path.read_text())
+        context["concurrency"] = True
+        context_path.write_text(json.dumps(context))
+        (point / "profile_export_aiperf.json").write_text("{}")
+
+        self.assertEqual(
+            run_state.classify_point(self.root, row, 1, 10).reason,
+            "metadata_mismatch_concurrency",
+        )
+
+    def test_classify_point_retries_malformed_summary(self):
+        row = run_state.PlanRow("single", 128, 16, 0)
+        point = self.point(row)
+        context_path = point / "run_context.json"
+        run_state.write_run_context(context_path, row, 1, 10)
+        run_state.finish_run_context(context_path, 0)
+        (point / "profile_export_aiperf.json").write_text("{")
+
+        self.assertEqual(
+            run_state.classify_point(self.root, row, 1, 10).reason,
+            "summary_missing_or_invalid",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
