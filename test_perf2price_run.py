@@ -315,6 +315,34 @@ class RunStateTests(unittest.TestCase):
             ],
         )
 
+    def test_expected_points_deduplicate_concurrency_values(self):
+        config = self.valid_config()
+        config["concurrency_list"] = "1,1,2,1"
+        self.write_config(config)
+        self.write_plan("single,128,16,0\n")
+
+        self.assertEqual(
+            [point.concurrency for point in run_state.expected_points(self.root)],
+            [1, 2],
+        )
+
+    def test_archive_point_rejects_symlinked_backup_root(self):
+        external_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(external_dir.cleanup)
+        external = pathlib.Path(external_dir.name)
+        point = self.root / "runs" / "single" / "c1"
+        point.mkdir(parents=True)
+        (point / "partial.log").write_text("preserve in run")
+        (self.root / "resume_backups").symlink_to(
+            external, target_is_directory=True
+        )
+
+        with self.assertRaisesRegex(run_state.RunStateError, "real directory"):
+            run_state.archive_point(self.root, "single", 1, "retryable")
+
+        self.assertEqual((point / "partial.log").read_text(), "preserve in run")
+        self.assertEqual(list(external.iterdir()), [])
+
     def test_archive_unexpected_points_preserves_non_authoritative_entries(self):
         self.write_config()
         self.write_plan("single,128,16,0\n")
@@ -347,6 +375,24 @@ class RunStateTests(unittest.TestCase):
         self.assertTrue(
             all("resume_backups/unexpected" in str(path) for path in archived)
         )
+
+    def test_unexpected_archive_rejects_symlinked_backup_root(self):
+        external_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(external_dir.cleanup)
+        external = pathlib.Path(external_dir.name)
+        self.write_config()
+        self.write_plan("single,128,16,0\n")
+        unexpected = self.root / "runs" / "removed" / "c1"
+        unexpected.mkdir(parents=True)
+        (self.root / "resume_backups").symlink_to(
+            external, target_is_directory=True
+        )
+
+        with self.assertRaisesRegex(run_state.RunStateError, "real directory"):
+            run_state.archive_unexpected_points(self.root)
+
+        self.assertTrue(unexpected.is_dir())
+        self.assertEqual(list(external.iterdir()), [])
 
     def test_lock_reclaims_only_stale_local_owner(self):
         run_state.acquire_lock(
@@ -413,6 +459,36 @@ class RunStateTests(unittest.TestCase):
                 hostname="host",
                 is_alive=lambda pid: pid == 300,
             )
+
+    def test_stale_lock_archive_rejects_symlinked_backup_root(self):
+        external_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(external_dir.cleanup)
+        external = pathlib.Path(external_dir.name)
+        run_state.acquire_lock(
+            self.root,
+            100,
+            hostname="host",
+            is_alive=lambda _: False,
+            now_ns=1,
+        )
+        (self.root / "resume_backups").symlink_to(
+            external, target_is_directory=True
+        )
+
+        with self.assertRaisesRegex(run_state.RunStateError, "real directory"):
+            run_state.acquire_lock(
+                self.root,
+                200,
+                hostname="host",
+                is_alive=lambda _: False,
+                now_ns=2,
+            )
+
+        owner = json.loads(
+            (self.root / ".perf2price.lock" / "owner.json").read_text()
+        )
+        self.assertEqual(owner["pid"], 100)
+        self.assertEqual(list(external.iterdir()), [])
 
     def test_lock_never_reclaims_foreign_host(self):
         run_state.acquire_lock(

@@ -164,6 +164,8 @@ The default concurrency sweep is:
 4,8,16,32,64
 ```
 
+Repeated concurrency values are treated as one matrix point.
+
 The important result for coefficient fitting is not the requested ISL or OSL alone. It is the **actual token usage reported by the server** together with the **requested profiling window and actual benchmark duration reported by AIPerf**.
 
 ---
@@ -781,6 +783,8 @@ Resume from the existing artifact directory:
 ```
 
 The saved `run_config.json` and `benchmark_plan.csv` are authoritative. Resume restores the endpoint, model, tokenizer, benchmark matrix, duration, AIPerf HTTP connection limit, SLOs, and other run settings. It rejects new benchmark options and refuses to continue when the recorded AIPerf version differs from the installed version.
+
+Configuration schemas 0 and 1 predate the saved HTTP connection-limit field. For these legacy artifacts, resume uses the historical default of the maximum saved concurrency plus 64. Older point contexts do not record the limit, so they are preserved under `resume_backups/` and rerun under that fallback instead of being mixed with new measurements. If the original run used an environment override, that value cannot be recovered from the artifact; this full retry is the compatibility containment.
 
 A point is skipped only when its saved context matches the plan and concurrency, AIPerf exited successfully, and its summary JSON is readable. Interrupted, failed, malformed, or metadata-mismatched points are moved under `resume_backups/` before being retried. Points that never started run normally. Aggregate CSV and JSON outputs are regenerated even when every benchmark point is already complete.
 

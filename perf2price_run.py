@@ -15,6 +15,7 @@ import os
 import pathlib
 import re
 import socket
+import stat
 import sys
 import tempfile
 import time
@@ -145,10 +146,14 @@ def parse_concurrencies(value: str) -> list[int]:
     if not items:
         raise RunStateError("saved concurrency list is empty")
     values = []
+    seen = set()
     for item in items:
         if not re.fullmatch(r"[0-9]+", item) or int(item) <= 0:
             raise RunStateError(f"invalid saved concurrency: {item!r}")
-        values.append(int(item))
+        parsed = int(item)
+        if parsed not in seen:
+            values.append(parsed)
+            seen.add(parsed)
     return values
 
 
@@ -468,6 +473,48 @@ def _unique_destination(path: pathlib.Path) -> pathlib.Path:
         counter += 1
 
 
+def _backup_directory(root: pathlib.Path, *parts: str) -> pathlib.Path:
+    root_path = pathlib.Path(root)
+    try:
+        resolved_root = root_path.resolve(strict=True)
+        root_mode = resolved_root.stat().st_mode
+    except OSError as exc:
+        raise RunStateError(f"cannot resolve run directory {root}: {exc}") from exc
+    if not stat.S_ISDIR(root_mode):
+        raise RunStateError(f"run directory is not a real directory: {root}")
+
+    current = root_path
+    for part in ("resume_backups", *parts):
+        if part in {"", ".", ".."} or pathlib.PurePath(part).name != part:
+            raise RunStateError(f"invalid backup path component: {part!r}")
+        current = current / part
+        try:
+            current.mkdir()
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise RunStateError(
+                f"cannot create backup directory {current}: {exc}"
+            ) from exc
+        try:
+            mode = current.lstat().st_mode
+        except OSError as exc:
+            raise RunStateError(
+                f"cannot inspect backup directory {current}: {exc}"
+            ) from exc
+        if not stat.S_ISDIR(mode):
+            raise RunStateError(
+                f"backup path component is not a real directory: {current}"
+            )
+        try:
+            current.resolve(strict=True).relative_to(resolved_root)
+        except (OSError, ValueError) as exc:
+            raise RunStateError(
+                f"backup directory escapes run directory: {current}"
+            ) from exc
+    return current
+
+
 def archive_point(
     root: pathlib.Path,
     profile: str,
@@ -488,10 +535,9 @@ def archive_point(
     owner = os.getpid() if pid is None else pid
     safe_reason = re.sub(r"[^A-Za-z0-9._-]", "_", reason).strip("_")
     safe_reason = safe_reason or "unknown"
-    target = root / "resume_backups" / profile / f"c{concurrency}" / (
+    target = _backup_directory(root, profile, f"c{concurrency}") / (
         f"attempt-{stamp}-{owner}-{safe_reason}"
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
     target = _unique_destination(target)
     try:
         os.replace(source, target)
@@ -512,10 +558,9 @@ def _archive_unexpected_entry(
 ) -> pathlib.Path:
     safe_label = re.sub(r"[^A-Za-z0-9._-]", "_", label).strip("_")
     safe_label = safe_label or "entry"
-    target = root / "resume_backups" / "unexpected" / (
+    target = _backup_directory(root, "unexpected") / (
         f"attempt-{now_ns}-{pid}-{safe_label}"
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
     target = _unique_destination(target)
     try:
         os.replace(source, target)
@@ -701,12 +746,9 @@ def acquire_lock(
             stale_owner = "unknown"
 
         backup = _unique_destination(
-            root
-            / "resume_backups"
-            / "locks"
+            _backup_directory(root, "locks")
             / f"stale-{stamp}-{stale_owner}"
         )
-        backup.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.rename(lock, backup)
         except FileNotFoundError:
