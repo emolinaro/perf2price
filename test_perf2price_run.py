@@ -299,9 +299,7 @@ class RunStateTests(unittest.TestCase):
     def test_expected_points_canonicalize_quoted_plan_rows(self):
         self.write_config()
         plan = self.root / "benchmark_plan.csv"
-        plan.write_text(
-            'name,isl,osl,prefix_tokens\n"single","128","16","0"\n'
-        )
+        plan.write_text('name,isl,osl,prefix_tokens\n"single","128","16","0"\n')
 
         self.assertEqual(
             run_state.expected_points(self.root),
@@ -333,9 +331,7 @@ class RunStateTests(unittest.TestCase):
         point = self.root / "runs" / "single" / "c1"
         point.mkdir(parents=True)
         (point / "partial.log").write_text("preserve in run")
-        (self.root / "resume_backups").symlink_to(
-            external, target_is_directory=True
-        )
+        (self.root / "resume_backups").symlink_to(external, target_is_directory=True)
 
         with self.assertRaisesRegex(run_state.RunStateError, "real directory"):
             run_state.archive_point(self.root, "single", 1, "retryable")
@@ -356,9 +352,7 @@ class RunStateTests(unittest.TestCase):
         removed_profile.mkdir(parents=True)
         (removed_profile / "extra.txt").write_text("removed profile")
 
-        archived = run_state.archive_unexpected_points(
-            self.root, now_ns=123, pid=456
-        )
+        archived = run_state.archive_unexpected_points(self.root, now_ns=123, pid=456)
 
         self.assertEqual((expected / "expected.txt").read_text(), "keep")
         self.assertFalse(extra_concurrency.exists())
@@ -384,9 +378,7 @@ class RunStateTests(unittest.TestCase):
         self.write_plan("single,128,16,0\n")
         unexpected = self.root / "runs" / "removed" / "c1"
         unexpected.mkdir(parents=True)
-        (self.root / "resume_backups").symlink_to(
-            external, target_is_directory=True
-        )
+        (self.root / "resume_backups").symlink_to(external, target_is_directory=True)
 
         with self.assertRaisesRegex(run_state.RunStateError, "real directory"):
             run_state.archive_unexpected_points(self.root)
@@ -419,15 +411,11 @@ class RunStateTests(unittest.TestCase):
             now_ns=3,
         )
 
-        owner = json.loads(
-            (self.root / ".perf2price.lock" / "owner.json").read_text()
-        )
+        owner = json.loads((self.root / ".perf2price.lock" / "owner.json").read_text())
         self.assertEqual(owner["pid"], 200)
         stale = list((self.root / "resume_backups" / "locks").iterdir())
         self.assertEqual(len(stale), 1)
-        self.assertEqual(
-            json.loads((stale[0] / "owner.json").read_text())["pid"], 100
-        )
+        self.assertEqual(json.loads((stale[0] / "owner.json").read_text())["pid"], 100)
 
         with self.assertRaisesRegex(run_state.RunStateError, "owned by"):
             run_state.release_lock(self.root, 201, hostname="host")
@@ -471,9 +459,7 @@ class RunStateTests(unittest.TestCase):
             is_alive=lambda _: False,
             now_ns=1,
         )
-        (self.root / "resume_backups").symlink_to(
-            external, target_is_directory=True
-        )
+        (self.root / "resume_backups").symlink_to(external, target_is_directory=True)
 
         with self.assertRaisesRegex(run_state.RunStateError, "real directory"):
             run_state.acquire_lock(
@@ -484,9 +470,7 @@ class RunStateTests(unittest.TestCase):
                 now_ns=2,
             )
 
-        owner = json.loads(
-            (self.root / ".perf2price.lock" / "owner.json").read_text()
-        )
+        owner = json.loads((self.root / ".perf2price.lock" / "owner.json").read_text())
         self.assertEqual(owner["pid"], 100)
         self.assertEqual(list(external.iterdir()), [])
 

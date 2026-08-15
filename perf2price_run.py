@@ -268,7 +268,9 @@ def load_run_config(root: pathlib.Path) -> dict:
     except FileNotFoundError as exc:
         raise RunStateError(f"missing saved run configuration: {path}") from exc
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RunStateError(f"cannot read saved run configuration {path}: {exc}") from exc
+        raise RunStateError(
+            f"cannot read saved run configuration {path}: {exc}"
+        ) from exc
     return _validated_config(config)
 
 
@@ -295,7 +297,9 @@ def load_plan(path: pathlib.Path) -> list[PlanRow]:
                 )
             validate_profile_name(name)
             if name in seen:
-                raise RunStateError(f"duplicate profile name in benchmark plan: {name!r}")
+                raise RunStateError(
+                    f"duplicate profile name in benchmark plan: {name!r}"
+                )
             parsed = []
             for field, value in zip(("isl", "osl", "prefix_tokens"), values[1:]):
                 if not re.fullmatch(r"[0-9]+", value):
@@ -444,9 +448,7 @@ def classify_point(
     if not _is_number(saved_duration) or not math.isclose(
         float(saved_duration), float(duration), rel_tol=0, abs_tol=1e-9
     ):
-        return PointStatus(
-            "retryable", "metadata_mismatch_requested_duration_seconds"
-        )
+        return PointStatus("retryable", "metadata_mismatch_requested_duration_seconds")
     saved_exit_code = context.get("aiperf_exit_code")
     if (
         context.get("aiperf_ok") is not True
@@ -588,11 +590,7 @@ def archive_unexpected_points(
     for point in points:
         expected.setdefault(point.row.name, set()).add(f"c{point.concurrency}")
     if runs.is_symlink() or not runs.is_dir():
-        return [
-            _archive_unexpected_entry(
-                root, runs, "runs", now_ns=stamp, pid=owner
-            )
-        ]
+        return [_archive_unexpected_entry(root, runs, "runs", now_ns=stamp, pid=owner)]
 
     archived = []
     for profile_entry in sorted(runs.iterdir(), key=lambda path: path.name):
@@ -746,8 +744,7 @@ def acquire_lock(
             stale_owner = "unknown"
 
         backup = _unique_destination(
-            _backup_directory(root, "locks")
-            / f"stale-{stamp}-{stale_owner}"
+            _backup_directory(root, "locks") / f"stale-{stamp}-{stale_owner}"
         )
         try:
             os.rename(lock, backup)
@@ -886,7 +883,9 @@ def _write_config_from_args(values) -> None:
     try:
         extra_args = json.loads(values.extra_args_json)
     except json.JSONDecodeError as exc:
-        raise RunStateError(f"extra AIPerf arguments are not valid JSON: {exc}") from exc
+        raise RunStateError(
+            f"extra AIPerf arguments are not valid JSON: {exc}"
+        ) from exc
     config = {
         "config_schema_version": CONFIG_SCHEMA_VERSION,
         "url": values.url,

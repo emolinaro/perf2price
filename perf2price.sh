@@ -388,15 +388,15 @@ if [[ "$RESUME_MODE" -eq 1 ]]; then
 	for ((i = 0; i < ${#EXTRA_AIPERF_ARGS[@]}; i++)); do
 		arg="${EXTRA_AIPERF_ARGS[$i]}"
 		if [[ "$arg" == "--api-key" ]]; then
-			((i + 1 < ${#EXTRA_AIPERF_ARGS[@]})) || \
+			((i + 1 < ${#EXTRA_AIPERF_ARGS[@]})) ||
 				die "saved AIPerf arguments end with --api-key and cannot be resumed"
-			[[ -n "$API_KEY" ]] || \
+			[[ -n "$API_KEY" ]] ||
 				die "resume requires --api-key or OPENAI_API_KEY to restore saved AIPerf credentials"
 			EXTRA_AIPERF_ARGS[i + 1]="$API_KEY"
 			SAVED_EXTRA_API_KEY=1
 			i=$((i + 1))
 		elif [[ "$arg" == --api-key=* ]]; then
-			[[ -n "$API_KEY" ]] || \
+			[[ -n "$API_KEY" ]] ||
 				die "resume requires --api-key or OPENAI_API_KEY to restore saved AIPerf credentials"
 			EXTRA_AIPERF_ARGS[i]="--api-key=$API_KEY"
 			SAVED_EXTRA_API_KEY=1
@@ -421,11 +421,7 @@ TOKENIZER="${TOKENIZER:-$MODEL}"
 
 command -v "$AIPERF_BIN" >/dev/null 2>&1 || die "AIPerf not found: $AIPERF_BIN"
 AIPERF_VERSION="$("$AIPERF_BIN" --version 2>/dev/null | head -n 1 || true)"
-if [[
-	"$RESUME_MODE" -eq 1 &&
-	-n "$SAVED_AIPERF_VERSION" &&
-	"$AIPERF_VERSION" != "$SAVED_AIPERF_VERSION"
-]]; then
+if [[ "$RESUME_MODE" -eq 1 && -n "$SAVED_AIPERF_VERSION" && "$AIPERF_VERSION" != "$SAVED_AIPERF_VERSION" ]]; then
 	die "AIPerf version mismatch: saved '$SAVED_AIPERF_VERSION', current '$AIPERF_VERSION'"
 fi
 
@@ -509,9 +505,9 @@ PY
 if [[ "$RESUME_MODE" -eq 0 ]]; then
 	HTTP_CONNECTION_LIMIT="${AIPERF_HTTP_CONNECTION_LIMIT:-$((MAX_CONCURRENCY + 64))}"
 fi
-[[ "$HTTP_CONNECTION_LIMIT" =~ ^[0-9]+$ ]] || \
+[[ "$HTTP_CONNECTION_LIMIT" =~ ^[0-9]+$ ]] ||
 	die "saved AIPerf HTTP connection limit must be a positive integer"
-((10#$HTTP_CONNECTION_LIMIT > 0)) || \
+((10#$HTTP_CONNECTION_LIMIT > 0)) ||
 	die "saved AIPerf HTTP connection limit must be a positive integer"
 export AIPERF_HTTP_CONNECTION_LIMIT="$HTTP_CONNECTION_LIMIT"
 

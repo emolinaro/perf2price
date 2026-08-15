@@ -34,7 +34,9 @@ perf2price/
 ├── requirements.txt
 ├── perf2price.sh
 ├── perf2price_fit.py
+├── perf2price_run.py
 ├── test_perf2price.py
+├── test_perf2price_run.py
 └── examples/
     └── benchmark-plan.csv
 ```

@@ -218,9 +218,7 @@ def write_csv(path, records, columns):
     tmp = pathlib.Path(raw_tmp)
     try:
         with os.fdopen(fd, "w", newline="") as stream:
-            writer = csv.DictWriter(
-                stream, fieldnames=columns, extrasaction="ignore"
-            )
+            writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(records)
             stream.flush()
@@ -262,8 +260,7 @@ def meets_slo(r, ttft_limit, itl_limit):
 def _point_context_paths(root, point_manifest):
     if point_manifest is None:
         return [
-            (path, None)
-            for path in sorted(root.glob("runs/*/c*/run_context.json"))
+            (path, None) for path in sorted(root.glob("runs/*/c*/run_context.json"))
         ]
     paths = []
     with pathlib.Path(point_manifest).open(newline="") as stream:
@@ -273,9 +270,7 @@ def _point_context_paths(root, point_manifest):
                     f"point manifest line {line_number} must contain exactly 7 fields"
                 )
             profile, isl, osl, prefix, concurrency, duration, connection_limit = values
-            if profile in {".", ".."} or not re.fullmatch(
-                r"[A-Za-z0-9._-]+", profile
-            ):
+            if profile in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]+", profile):
                 raise ValueError(
                     f"point manifest line {line_number} has invalid profile"
                 )

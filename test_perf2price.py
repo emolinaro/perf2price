@@ -34,7 +34,7 @@ class Perf2PriceRegressionTests(unittest.TestCase):
         invocation_log = root / "invocations.txt"
         fake_aiperf = root / "aiperf"
         fake_aiperf.write_text(
-            f'''#!/usr/bin/env python3
+            f"""#!/usr/bin/env python3
 import json
 import os
 import pathlib
@@ -62,7 +62,7 @@ summary = {{
     "error_summary": [],
 }}
 (artifact_dir / "profile_export_aiperf.json").write_text(json.dumps(summary))
-'''
+"""
         )
         fake_aiperf.chmod(0o755)
         return fake_aiperf, invocation_log
@@ -110,9 +110,7 @@ summary = {{
                 "--skip-probe",
             ],
             cwd=script.parent,
-            env=self.benchmark_env(
-                fake_aiperf, api_key, http_connection_limit
-            ),
+            env=self.benchmark_env(fake_aiperf, api_key, http_connection_limit),
             capture_output=True,
             text=True,
             timeout=30,
@@ -321,9 +319,7 @@ summary = {
             temp = pathlib.Path(temp_dir)
             fake_aiperf, invocation_log = self.write_successful_fake_aiperf(temp)
             plan = temp / "plan.csv"
-            plan.write_text(
-                'name,isl,osl,prefix_tokens\n"single","128","16","0"\n'
-            )
+            plan.write_text('name,isl,osl,prefix_tokens\n"single","128","16","0"\n')
 
             result = self.run_single_concurrency_benchmark(
                 plan, temp / "output", fake_aiperf
@@ -362,9 +358,7 @@ summary = {
                     str(out_dir),
                 ],
                 cwd=pathlib.Path(__file__).parent,
-                env=self.benchmark_env(
-                    fake_aiperf, http_connection_limit=999
-                ),
+                env=self.benchmark_env(fake_aiperf, http_connection_limit=999),
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -484,9 +478,7 @@ summary = {{
             fake_aiperf.chmod(0o755)
             plan = temp / "plan.csv"
             plan.write_text(
-                "name,isl,osl,prefix_tokens\n"
-                "first,128,16,0\n"
-                "second,64,64,0\n"
+                "name,isl,osl,prefix_tokens\nfirst,128,16,0\nsecond,64,64,0\n"
             )
             out_dir = temp / "output"
             script = pathlib.Path(__file__).with_name("perf2price.sh")
@@ -532,9 +524,7 @@ summary = {{
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=10)
 
-            self.assertNotEqual(
-                process.returncode, 0, initial_stdout + initial_stderr
-            )
+            self.assertNotEqual(process.returncode, 0, initial_stdout + initial_stderr)
             self.assertFalse((out_dir / ".perf2price.lock").exists())
 
             result = subprocess.run(
@@ -561,7 +551,9 @@ summary = {{
             self.assertEqual(len(backups), 1)
             self.assertTrue((backups[0] / "run_context.json").exists())
             for profile in ("first", "second"):
-                summary = out_dir / "runs" / profile / "c1" / "profile_export_aiperf.json"
+                summary = (
+                    out_dir / "runs" / profile / "c1" / "profile_export_aiperf.json"
+                )
                 self.assertIsInstance(json.loads(summary.read_text()), dict)
             for name in (
                 "summary.csv",
@@ -664,9 +656,7 @@ time.sleep(60)
             plan = temp / "plan.csv"
             plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
             baseline = temp / "baseline"
-            initial = self.run_single_concurrency_benchmark(
-                plan, baseline, fake_aiperf
-            )
+            initial = self.run_single_concurrency_benchmark(plan, baseline, fake_aiperf)
             self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
             script = pathlib.Path(__file__).with_name("perf2price.sh")
 
@@ -814,9 +804,7 @@ time.sleep(60)
                 timeout=30,
             )
             self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
-            self.assertNotIn(
-                replacement_secret, resumed.stdout + resumed.stderr
-            )
+            self.assertNotIn(replacement_secret, resumed.stdout + resumed.stderr)
 
     def test_legacy_resume_requires_explicit_authentication_decision(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -825,9 +813,7 @@ time.sleep(60)
             plan = temp / "plan.csv"
             plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
             out_dir = temp / "output"
-            initial = self.run_single_concurrency_benchmark(
-                plan, out_dir, fake_aiperf
-            )
+            initial = self.run_single_concurrency_benchmark(plan, out_dir, fake_aiperf)
             self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
             config_path = out_dir / "run_config.json"
             config = json.loads(config_path.read_text())
@@ -883,9 +869,7 @@ time.sleep(60)
             plan = temp / "plan.csv"
             plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
             out_dir = temp / "output"
-            initial = self.run_single_concurrency_benchmark(
-                plan, out_dir, fake_aiperf
-            )
+            initial = self.run_single_concurrency_benchmark(plan, out_dir, fake_aiperf)
             self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
             stray = out_dir / "runs" / "removed_profile" / "c1"
             stray.mkdir(parents=True)
@@ -940,9 +924,7 @@ time.sleep(60)
             plan = temp / "plan.csv"
             plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
             out_dir = temp / "output"
-            initial = self.run_single_concurrency_benchmark(
-                plan, out_dir, fake_aiperf
-            )
+            initial = self.run_single_concurrency_benchmark(plan, out_dir, fake_aiperf)
             self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
             context_path = out_dir / "runs" / "single" / "c1" / "run_context.json"
             context = json.loads(context_path.read_text())
@@ -984,9 +966,7 @@ raise SystemExit(1)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             with (out_dir / "summary.csv").open(newline="") as stream:
                 self.assertEqual(list(csv.DictReader(stream)), [])
-            with (out_dir / "selected_capacity_points.csv").open(
-                newline=""
-            ) as stream:
+            with (out_dir / "selected_capacity_points.csv").open(newline="") as stream:
                 self.assertEqual(list(csv.DictReader(stream)), [])
             pricing = json.loads((out_dir / "pricing_fit.json").read_text())
             self.assertEqual(
@@ -1042,14 +1022,10 @@ raise SystemExit(1)
             fake_aiperf, invocation_log = self.write_successful_fake_aiperf(temp)
             plan = temp / "plan.csv"
             plan.write_text(
-                "name,isl,osl,prefix_tokens\n"
-                "failed,128,16,0\n"
-                "malformed,64,64,0\n"
+                "name,isl,osl,prefix_tokens\nfailed,128,16,0\nmalformed,64,64,0\n"
             )
             out_dir = temp / "output"
-            initial = self.run_single_concurrency_benchmark(
-                plan, out_dir, fake_aiperf
-            )
+            initial = self.run_single_concurrency_benchmark(plan, out_dir, fake_aiperf)
             self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
             failed_context_path = (
                 out_dir / "runs" / "failed" / "c1" / "run_context.json"
@@ -1059,11 +1035,7 @@ raise SystemExit(1)
             failed_context["aiperf_exit_code"] = 1
             failed_context_path.write_text(json.dumps(failed_context))
             malformed_summary = (
-                out_dir
-                / "runs"
-                / "malformed"
-                / "c1"
-                / "profile_export_aiperf.json"
+                out_dir / "runs" / "malformed" / "c1" / "profile_export_aiperf.json"
             )
             malformed_summary.write_text("{")
             script = pathlib.Path(__file__).with_name("perf2price.sh")
@@ -1091,11 +1063,7 @@ raise SystemExit(1)
                 )
                 self.assertEqual(len(backups), 1, profile)
                 summary = (
-                    out_dir
-                    / "runs"
-                    / profile
-                    / "c1"
-                    / "profile_export_aiperf.json"
+                    out_dir / "runs" / profile / "c1" / "profile_export_aiperf.json"
                 )
                 self.assertIsInstance(json.loads(summary.read_text()), dict)
 
