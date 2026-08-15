@@ -36,6 +36,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIPERF_BIN="${AIPERF_BIN:-aiperf}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 FIT_PY="${SCRIPT_DIR}/perf2price_fit.py"
+RUN_PY="${SCRIPT_DIR}/perf2price_run.py"
 
 URL=""
 MODEL=""
@@ -69,6 +70,7 @@ LEGACY_MAX_TOKENS=0
 SKIP_PROBE=0
 
 EXTRA_AIPERF_ARGS=()
+LOCK_HELD=0
 
 usage() {
 	cat <<'EOF'
@@ -164,6 +166,15 @@ die() {
 	echo "ERROR: $*" >&2
 	exit 1
 }
+
+release_run_lock() {
+	if [[ "$LOCK_HELD" -eq 1 ]]; then
+		"$PYTHON_BIN" "$RUN_PY" release-lock "$OUT_DIR" "$$" || true
+		LOCK_HELD=0
+	fi
+}
+
+trap release_run_lock EXIT
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -286,10 +297,13 @@ TOKENIZER="${TOKENIZER:-$MODEL}"
 command -v "$AIPERF_BIN" >/dev/null 2>&1 || die "AIPerf not found: $AIPERF_BIN"
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "Python not found: $PYTHON_BIN"
 [[ -f "$FIT_PY" ]] || die "fit module not found: $FIT_PY"
+[[ -f "$RUN_PY" ]] || die "run-state module not found: $RUN_PY"
 
 AIPERF_VERSION="$("$AIPERF_BIN" --version 2>/dev/null | head -n 1 || true)"
 
 mkdir -p "$OUT_DIR"
+"$PYTHON_BIN" "$RUN_PY" acquire-lock "$OUT_DIR" "$$"
+LOCK_HELD=1
 
 echo "Tokenizer used by AIPerf: $TOKENIZER"
 if [[ "$TOKENIZER" = "builtin" ]]; then
@@ -338,6 +352,7 @@ cache_4k,512,256,4096
 cache_8k,512,256,8192
 EOF
 fi
+"$PYTHON_BIN" "$RUN_PY" validate-plan "$DEFAULT_PLAN"
 
 # Validate concurrency list and compute max.
 MAX_CONCURRENCY="$(
@@ -382,55 +397,20 @@ for arg in sys.argv[1:]:
 print(json.dumps(redacted))
 ' "${EXTRA_AIPERF_ARGS[@]}")"
 fi
-"$PYTHON_BIN" - "${OUT_DIR}/run_config.json" \
+
+API_KEY_REQUIRED=0
+if [[ -n "$API_KEY" ]]; then
+	API_KEY_REQUIRED=1
+fi
+
+"$PYTHON_BIN" "$RUN_PY" write-config "${OUT_DIR}/run_config.json" \
 	"$URL" "$ENDPOINT" "$MODELS_ENDPOINT" "$MODEL" "$TOKENIZER" \
 	"$TOKENIZER_REVISION" "$CONCURRENCY_LIST" "$DURATION" "$GRACE_PERIOD" \
 	"$TTFT_P99_MS" "$ITL_P99_MS" "${RESOURCE_HOUR_COST:-}" \
 	"$RANDOM_SEED" "$NUM_DATASET_ENTRIES" \
 	"$TOKENIZER_TRUST_REMOTE_CODE" "$APPLY_CHAT_TEMPLATE" \
 	"$LEGACY_MAX_TOKENS" "$RUN_CACHE_TESTS" "$SKIP_PROBE" "$MAX_CONTEXT" \
-	"${PLAN_FILE:-}" "${AIPERF_VERSION:-}" "$EXTRA_JSON" <<'PY'
-import json
-import sys
-
-(path, url, endpoint, models_endpoint, model, tokenizer, revision,
- concurrency_list, duration, grace, ttft, itl, hourly_cost,
- seed, entries, trust_remote, apply_chat, legacy, cache_tests, skip_probe,
- max_context, plan_file, aiperf_version, extra_json) = sys.argv[1:]
-
-def num(v):
-    n = float(v)
-    return int(n) if n == int(n) else n
-
-config = {
-    "url": url,
-    "endpoint": endpoint,
-    "models_endpoint": models_endpoint,
-    "model": model,
-    "tokenizer": tokenizer,
-    "tokenizer_revision": revision or None,
-    "tokenizer_trust_remote_code": trust_remote == "1",
-    "apply_chat_template": apply_chat == "1",
-    "legacy_max_tokens": legacy == "1",
-    "run_cache_tests": cache_tests == "1",
-    "skip_probe": skip_probe == "1",
-    "max_context": int(max_context),
-    "plan_file": plan_file or None,
-    "concurrency_list": concurrency_list,
-    "duration_seconds": num(duration),
-    "grace_period": grace,
-    "ttft_p99_ms": num(ttft),
-    "itl_p99_ms": num(itl),
-    "resource_hour_cost_usd": num(hourly_cost) if hourly_cost else None,
-    "random_seed": int(seed),
-    "num_dataset_entries": int(entries),
-    "aiperf_version": aiperf_version or None,
-    "extra_aiperf_args": json.loads(extra_json) if extra_json else [],
-}
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(config, f, indent=2)
-    f.write("\n")
-PY
+	"${PLAN_FILE:-}" "${AIPERF_VERSION:-}" "$API_KEY_REQUIRED" "$EXTRA_JSON"
 
 probe_endpoint() {
 	echo "Probing OpenAI-compatible endpoint: ${URL}${ENDPOINT}"
@@ -597,27 +577,8 @@ run_one() {
 	local run_dir="${OUT_DIR}/runs/${name}/c${concurrency}"
 	mkdir -p "$run_dir"
 
-	"$PYTHON_BIN" - "${run_dir}/run_context.json" \
-		"$name" "$isl" "$osl" "$prefix" "$concurrency" "$DURATION" <<'PY'
-import json
-import sys
-
-path, name, isl, osl, prefix, concurrency, duration = sys.argv[1:8]
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(
-        {
-            "profile": name,
-            "isl": int(isl),
-            "osl": int(osl),
-            "prefix_tokens": int(prefix),
-            "concurrency": int(concurrency),
-            "requested_duration_seconds": float(duration),
-        },
-        f,
-        indent=2,
-    )
-    f.write("\n")
-PY
+	"$PYTHON_BIN" "$RUN_PY" write-context "${run_dir}/run_context.json" \
+		"$name" "$isl" "$osl" "$prefix" "$concurrency" "$DURATION"
 
 	local warmup="$concurrency"
 	if ((warmup < 4)); then
@@ -709,19 +670,7 @@ PY
 	rc=$?
 	set -e
 
-	"$PYTHON_BIN" - "${run_dir}/run_context.json" "$rc" <<'PY'
-import json
-import sys
-
-path, rc = sys.argv[1], int(sys.argv[2])
-with open(path, encoding="utf-8") as f:
-    ctx = json.load(f)
-ctx["aiperf_exit_code"] = rc
-ctx["aiperf_ok"] = rc == 0
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(ctx, f, indent=2)
-    f.write("\n")
-PY
+	"$PYTHON_BIN" "$RUN_PY" finish-context "${run_dir}/run_context.json" "$rc"
 
 	if [[ "$rc" -ne 0 ]]; then
 		echo "WARNING: AIPerf failed for profile=$name concurrency=$concurrency (exit $rc); continuing." >&2

@@ -133,6 +133,132 @@ summary = {
                 ["--api-key", "REDACTED", "--api-key=REDACTED"],
             )
 
+    def test_initial_run_writes_resumable_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            fake_aiperf = temp / "aiperf"
+            fake_aiperf.write_text(
+                """#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+if "--version" in sys.argv:
+    print("aiperf 0.12.0")
+    raise SystemExit(0)
+
+artifact_dir = pathlib.Path(sys.argv[sys.argv.index("--artifact-dir") + 1])
+summary = {
+    "benchmark_duration": 1,
+    "total_usage_prompt_tokens": 128,
+    "total_usage_completion_tokens": 16,
+    "request_count": 1,
+    "request_throughput": 1,
+    "error_summary": [],
+}
+(artifact_dir / "profile_export_aiperf.json").write_text(json.dumps(summary))
+"""
+            )
+            fake_aiperf.chmod(0o755)
+            plan = temp / "plan.csv"
+            plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
+            out_dir = temp / "output"
+            secret = "resume-metadata-secret"
+            env = os.environ.copy()
+            env["AIPERF_BIN"] = str(fake_aiperf)
+            env["PYTHON_BIN"] = sys.executable
+            env["OPENAI_API_KEY"] = secret
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(pathlib.Path(__file__).with_name("perf2price.sh")),
+                    "--url",
+                    "http://localhost:8000",
+                    "--model",
+                    "test-model",
+                    "--concurrency",
+                    "1",
+                    "--duration",
+                    "1",
+                    "--grace-period",
+                    "0",
+                    "--plan",
+                    str(plan),
+                    "--out-dir",
+                    str(out_dir),
+                    "--skip-probe",
+                ],
+                cwd=pathlib.Path(__file__).parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            config_text = (out_dir / "run_config.json").read_text()
+            config = json.loads(config_text)
+            self.assertEqual(config["config_schema_version"], 1)
+            self.assertTrue(config["api_key_required"])
+            self.assertNotIn(secret, config_text)
+            self.assertNotIn(secret, result.stdout + result.stderr)
+            self.assertFalse((out_dir / ".perf2price.lock").exists())
+
+    def test_initial_run_rejects_unsafe_profile_before_aiperf(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            marker = temp / "aiperf-started"
+            fake_aiperf = temp / "aiperf"
+            fake_aiperf.write_text(
+                f"""#!/usr/bin/env python3
+import pathlib
+import sys
+
+if "--version" in sys.argv:
+    print("aiperf 0.12.0")
+    raise SystemExit(0)
+
+pathlib.Path({str(marker)!r}).write_text("started")
+"""
+            )
+            fake_aiperf.chmod(0o755)
+            plan = temp / "plan.csv"
+            plan.write_text("name,isl,osl,prefix_tokens\n../escape,128,16,0\n")
+            env = os.environ.copy()
+            env.pop("OPENAI_API_KEY", None)
+            env["AIPERF_BIN"] = str(fake_aiperf)
+            env["PYTHON_BIN"] = sys.executable
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(pathlib.Path(__file__).with_name("perf2price.sh")),
+                    "--url",
+                    "http://localhost:8000",
+                    "--model",
+                    "test-model",
+                    "--concurrency",
+                    "1",
+                    "--duration",
+                    "1",
+                    "--grace-period",
+                    "0",
+                    "--plan",
+                    str(plan),
+                    "--out-dir",
+                    str(temp / "output"),
+                    "--skip-probe",
+                ],
+                cwd=pathlib.Path(__file__).parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid profile name", result.stderr)
+            self.assertFalse(marker.exists())
+
     def test_malformed_primary_summary_is_skipped(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir)
