@@ -34,7 +34,9 @@ perf2price/
 ├── requirements.txt
 ├── perf2price.sh
 ├── perf2price_fit.py
+├── perf2price_run.py
 ├── test_perf2price.py
+├── test_perf2price_run.py
 └── examples/
     └── benchmark-plan.csv
 ```
@@ -163,6 +165,8 @@ The default concurrency sweep is:
 ```text
 4,8,16,32,64
 ```
+
+Repeated concurrency values are treated as one matrix point.
 
 The important result for coefficient fitting is not the requested ISL or OSL alone. It is the **actual token usage reported by the server** together with the **requested profiling window and actual benchmark duration reported by AIPerf**.
 
@@ -772,6 +776,28 @@ Before starting the benchmark matrix, the harness probes the models endpoint and
 
 A failed AIPerf concurrency point is recorded and skipped; the remaining summaries are still parsed and fitted.
 
+## Resume an interrupted run
+
+Resume from the existing artifact directory:
+
+```bash
+./perf2price.sh --resume perf2price-run-20260815-120000
+```
+
+The saved `run_config.json` and `benchmark_plan.csv` are authoritative. Resume restores the endpoint, model, tokenizer, benchmark matrix, duration, AIPerf HTTP connection limit, SLOs, and other run settings. It rejects new benchmark options and refuses to continue when the recorded AIPerf version differs from the installed version.
+
+Configuration schemas 0 and 1 predate the saved HTTP connection-limit field. For these legacy artifacts, resume uses the historical default of the maximum saved concurrency plus 64. Older point contexts do not record the limit, so they are preserved under `resume_backups/` and rerun under that fallback instead of being mixed with new measurements. If the original run used an environment override, that value cannot be recovered from the artifact; this full retry is the compatibility containment.
+
+A point is skipped only when its saved context matches the plan and concurrency, AIPerf exited successfully, and its summary JSON is readable. Interrupted, failed, malformed, or metadata-mismatched points are moved under `resume_backups/` before being retried. Points that never started run normally. Aggregate CSV and JSON outputs are regenerated even when every benchmark point is already complete.
+
+API keys are not stored in the run directory. For an authenticated run, provide a current key when resuming:
+
+```bash
+OPENAI_API_KEY=... ./perf2price.sh --resume perf2price-run-20260815-120000
+```
+
+You can also use `--api-key KEY`. Legacy run configurations that did not record whether authentication was used require either a current key or an explicit `--no-api-key` decision. Only one process can use a run directory at a time; the lock continues protecting a live AIPerf child if its parent shell exits, and an interrupted local lock is preserved and recovered automatically once both processes stop.
+
 ---
 
 # 9. Default benchmark plan
@@ -827,10 +853,18 @@ perf2price-run-YYYYMMDD-HHMMSS/
 │   ├── decode_2k/
 │   ├── mixed_8k/
 │   └── cache_8k/
+├── resume_backups/              # present only after retry or stale-lock recovery
+│   ├── <profile>/
+│   │   └── c<concurrency>/
+│   │       └── attempt-<timestamp>-<pid>-<reason>/
+│   ├── unexpected/              # points outside the authoritative matrix
+│   └── locks/                   # stale lock records
 ├── summary.csv
 ├── selected_capacity_points.csv
 └── pricing_fit.json
 ```
+
+`run_config.json` and `benchmark_plan.csv` contain the immutable inputs used by `--resume`. Each completed point under `runs/` contains `run_context.json` plus the AIPerf summary artifacts. `resume_backups/` keeps prior attempts for diagnosis instead of overwriting them.
 
 ## `summary.csv`
 

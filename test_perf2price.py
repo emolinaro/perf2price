@@ -1,13 +1,17 @@
 import contextlib
+import csv
 import http.server
 import io
 import json
 import os
 import pathlib
+import signal
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 import numpy as np
@@ -16,6 +20,110 @@ import perf2price_fit as fit
 
 
 class Perf2PriceRegressionTests(unittest.TestCase):
+    def wait_for_path(self, path, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                return
+            time.sleep(0.02)
+        self.fail(f"timed out waiting for {path}")
+
+    def write_successful_fake_aiperf(
+        self, root, version="aiperf 0.12.0", log_connection_limit=False
+    ):
+        invocation_log = root / "invocations.txt"
+        fake_aiperf = root / "aiperf"
+        fake_aiperf.write_text(
+            f"""#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+if "--version" in sys.argv:
+    print({version!r})
+    raise SystemExit(0)
+
+artifact_dir = pathlib.Path(sys.argv[sys.argv.index("--artifact-dir") + 1])
+profile = artifact_dir.parent.name
+with pathlib.Path({str(invocation_log)!r}).open("a") as stream:
+    entry = profile
+    if {log_connection_limit!r}:
+        entry += ":" + os.environ.get("AIPERF_HTTP_CONNECTION_LIMIT", "missing")
+    stream.write(entry + "\\n")
+isl = int(sys.argv[sys.argv.index("--synthetic-input-tokens-mean") + 1])
+osl = int(sys.argv[sys.argv.index("--output-tokens-mean") + 1])
+summary = {{
+    "benchmark_duration": 1,
+    "total_usage_prompt_tokens": isl,
+    "total_usage_completion_tokens": osl,
+    "request_count": 1,
+    "request_throughput": 1,
+    "error_summary": [],
+}}
+(artifact_dir / "profile_export_aiperf.json").write_text(json.dumps(summary))
+"""
+        )
+        fake_aiperf.chmod(0o755)
+        return fake_aiperf, invocation_log
+
+    def benchmark_env(self, fake_aiperf, api_key=None, http_connection_limit=None):
+        env = os.environ.copy()
+        env.pop("OPENAI_API_KEY", None)
+        env.pop("AIPERF_HTTP_CONNECTION_LIMIT", None)
+        if api_key is not None:
+            env["OPENAI_API_KEY"] = api_key
+        if http_connection_limit is not None:
+            env["AIPERF_HTTP_CONNECTION_LIMIT"] = str(http_connection_limit)
+        env["AIPERF_BIN"] = str(fake_aiperf)
+        env["PYTHON_BIN"] = sys.executable
+        return env
+
+    def run_single_concurrency_benchmark(
+        self,
+        plan,
+        out_dir,
+        fake_aiperf,
+        *,
+        api_key=None,
+        http_connection_limit=None,
+    ):
+        script = pathlib.Path(__file__).with_name("perf2price.sh")
+        return subprocess.run(
+            [
+                "bash",
+                str(script),
+                "--url",
+                "http://localhost:8000",
+                "--model",
+                "test-model",
+                "--concurrency",
+                "1",
+                "--duration",
+                "1",
+                "--grace-period",
+                "0",
+                "--plan",
+                str(plan),
+                "--out-dir",
+                str(out_dir),
+                "--skip-probe",
+            ],
+            cwd=script.parent,
+            env=self.benchmark_env(fake_aiperf, api_key, http_connection_limit),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def snapshot_tree(self, root):
+        return {
+            str(path.relative_to(root)): (
+                "directory" if path.is_dir() else path.read_bytes()
+            )
+            for path in sorted(root.rglob("*"))
+        }
+
     def write_run(
         self,
         root,
@@ -132,6 +240,832 @@ summary = {
                 config["extra_aiperf_args"],
                 ["--api-key", "REDACTED", "--api-key=REDACTED"],
             )
+
+    def test_initial_run_writes_resumable_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            fake_aiperf = temp / "aiperf"
+            fake_aiperf.write_text(
+                """#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+if "--version" in sys.argv:
+    print("aiperf 0.12.0")
+    raise SystemExit(0)
+
+artifact_dir = pathlib.Path(sys.argv[sys.argv.index("--artifact-dir") + 1])
+summary = {
+    "benchmark_duration": 1,
+    "total_usage_prompt_tokens": 128,
+    "total_usage_completion_tokens": 16,
+    "request_count": 1,
+    "request_throughput": 1,
+    "error_summary": [],
+}
+(artifact_dir / "profile_export_aiperf.json").write_text(json.dumps(summary))
+"""
+            )
+            fake_aiperf.chmod(0o755)
+            plan = temp / "plan.csv"
+            plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
+            out_dir = temp / "output"
+            secret = "resume-metadata-secret"
+            env = os.environ.copy()
+            env.pop("AIPERF_HTTP_CONNECTION_LIMIT", None)
+            env["AIPERF_BIN"] = str(fake_aiperf)
+            env["PYTHON_BIN"] = sys.executable
+            env["OPENAI_API_KEY"] = secret
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(pathlib.Path(__file__).with_name("perf2price.sh")),
+                    "--url",
+                    "http://localhost:8000",
+                    "--model",
+                    "test-model",
+                    "--concurrency",
+                    "1",
+                    "--duration",
+                    "1",
+                    "--grace-period",
+                    "0",
+                    "--plan",
+                    str(plan),
+                    "--out-dir",
+                    str(out_dir),
+                    "--skip-probe",
+                ],
+                cwd=pathlib.Path(__file__).parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            config_text = (out_dir / "run_config.json").read_text()
+            config = json.loads(config_text)
+            self.assertEqual(config["config_schema_version"], 2)
+            self.assertTrue(config["api_key_required"])
+            self.assertEqual(config["http_connection_limit"], 65)
+            self.assertNotIn(secret, config_text)
+            self.assertNotIn(secret, result.stdout + result.stderr)
+            self.assertFalse((out_dir / ".perf2price.lock").exists())
+
+    def test_quoted_csv_plan_executes_canonical_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            fake_aiperf, invocation_log = self.write_successful_fake_aiperf(temp)
+            plan = temp / "plan.csv"
+            plan.write_text('name,isl,osl,prefix_tokens\n"single","128","16","0"\n')
+
+            result = self.run_single_concurrency_benchmark(
+                plan, temp / "output", fake_aiperf
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(invocation_log.read_text().splitlines(), ["single"])
+
+    def test_resume_restores_saved_http_connection_limit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            fake_aiperf, invocation_log = self.write_successful_fake_aiperf(
+                temp, log_connection_limit=True
+            )
+            plan = temp / "plan.csv"
+            plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
+            out_dir = temp / "output"
+            initial = self.run_single_concurrency_benchmark(
+                plan,
+                out_dir,
+                fake_aiperf,
+                http_connection_limit=321,
+            )
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            context_path = out_dir / "runs" / "single" / "c1" / "run_context.json"
+            context = json.loads(context_path.read_text())
+            context["aiperf_ok"] = False
+            context["aiperf_exit_code"] = 1
+            context_path.write_text(json.dumps(context))
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(pathlib.Path(__file__).with_name("perf2price.sh")),
+                    "--resume",
+                    str(out_dir),
+                ],
+                cwd=pathlib.Path(__file__).parent,
+                env=self.benchmark_env(fake_aiperf, http_connection_limit=999),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(
+                invocation_log.read_text().splitlines(),
+                ["single:321", "single:321"],
+            )
+            self.assertEqual(
+                json.loads((out_dir / "run_config.json").read_text())[
+                    "http_connection_limit"
+                ],
+                321,
+            )
+
+    def test_initial_run_rejects_unsafe_profile_before_aiperf(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            marker = temp / "aiperf-started"
+            fake_aiperf = temp / "aiperf"
+            fake_aiperf.write_text(
+                f"""#!/usr/bin/env python3
+import pathlib
+import sys
+
+if "--version" in sys.argv:
+    print("aiperf 0.12.0")
+    raise SystemExit(0)
+
+pathlib.Path({str(marker)!r}).write_text("started")
+"""
+            )
+            fake_aiperf.chmod(0o755)
+            plan = temp / "plan.csv"
+            plan.write_text("name,isl,osl,prefix_tokens\n../escape,128,16,0\n")
+            env = os.environ.copy()
+            env.pop("OPENAI_API_KEY", None)
+            env["AIPERF_BIN"] = str(fake_aiperf)
+            env["PYTHON_BIN"] = sys.executable
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(pathlib.Path(__file__).with_name("perf2price.sh")),
+                    "--url",
+                    "http://localhost:8000",
+                    "--model",
+                    "test-model",
+                    "--concurrency",
+                    "1",
+                    "--duration",
+                    "1",
+                    "--grace-period",
+                    "0",
+                    "--plan",
+                    str(plan),
+                    "--out-dir",
+                    str(temp / "output"),
+                    "--skip-probe",
+                ],
+                cwd=pathlib.Path(__file__).parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid profile name", result.stderr)
+            self.assertFalse(marker.exists())
+
+    def test_resume_after_interrupted_point(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            invocation_log = temp / "invocations.txt"
+            block_once = temp / "block-once"
+            second_started = temp / "second-started"
+            block_once.write_text("block")
+            fake_aiperf = temp / "aiperf"
+            fake_aiperf.write_text(
+                f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+import time
+
+if "--version" in sys.argv:
+    print("aiperf 0.12.0")
+    raise SystemExit(0)
+
+artifact_dir = pathlib.Path(sys.argv[sys.argv.index("--artifact-dir") + 1])
+profile = artifact_dir.parent.name
+log = pathlib.Path({str(invocation_log)!r})
+with log.open("a") as stream:
+    stream.write(profile + "\\n")
+
+block_once = pathlib.Path({str(block_once)!r})
+if profile == "second" and block_once.exists():
+    block_once.unlink()
+    pathlib.Path({str(second_started)!r}).write_text("started")
+    time.sleep(60)
+
+isl = int(sys.argv[sys.argv.index("--synthetic-input-tokens-mean") + 1])
+osl = int(sys.argv[sys.argv.index("--output-tokens-mean") + 1])
+summary = {{
+    "benchmark_duration": 1,
+    "total_usage_prompt_tokens": isl,
+    "total_usage_completion_tokens": osl,
+    "request_count": 1,
+    "request_throughput": 1,
+    "error_summary": [],
+}}
+(artifact_dir / "profile_export_aiperf.json").write_text(json.dumps(summary))
+"""
+            )
+            fake_aiperf.chmod(0o755)
+            plan = temp / "plan.csv"
+            plan.write_text(
+                "name,isl,osl,prefix_tokens\nfirst,128,16,0\nsecond,64,64,0\n"
+            )
+            out_dir = temp / "output"
+            script = pathlib.Path(__file__).with_name("perf2price.sh")
+            env = os.environ.copy()
+            env.pop("OPENAI_API_KEY", None)
+            env["AIPERF_BIN"] = str(fake_aiperf)
+            env["PYTHON_BIN"] = sys.executable
+            initial_command = [
+                "bash",
+                str(script),
+                "--url",
+                "http://localhost:8000",
+                "--model",
+                "test-model",
+                "--concurrency",
+                "1",
+                "--duration",
+                "1",
+                "--grace-period",
+                "0",
+                "--plan",
+                str(plan),
+                "--out-dir",
+                str(out_dir),
+                "--skip-probe",
+            ]
+
+            process = subprocess.Popen(
+                initial_command,
+                cwd=script.parent,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                self.wait_for_path(second_started, timeout=10)
+                os.killpg(process.pid, signal.SIGINT)
+                initial_stdout, initial_stderr = process.communicate(timeout=10)
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=10)
+
+            self.assertNotEqual(process.returncode, 0, initial_stdout + initial_stderr)
+            self.assertFalse((out_dir / ".perf2price.lock").exists())
+
+            result = subprocess.run(
+                ["bash", str(script), "--resume", str(out_dir)],
+                cwd=script.parent,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(
+                invocation_log.read_text().splitlines(),
+                ["first", "second", "second"],
+            )
+            self.assertIn(
+                "Skipping completed point: profile=first concurrency=1",
+                result.stdout,
+            )
+            backups = list(
+                (out_dir / "resume_backups" / "second" / "c1").glob("attempt-*")
+            )
+            self.assertEqual(len(backups), 1)
+            self.assertTrue((backups[0] / "run_context.json").exists())
+            for profile in ("first", "second"):
+                summary = (
+                    out_dir / "runs" / profile / "c1" / "profile_export_aiperf.json"
+                )
+                self.assertIsInstance(json.loads(summary.read_text()), dict)
+            for name in (
+                "summary.csv",
+                "selected_capacity_points.csv",
+                "pricing_fit.json",
+            ):
+                self.assertTrue((out_dir / name).exists(), name)
+            self.assertFalse((out_dir / ".perf2price.lock").exists())
+
+    def test_resume_lock_tracks_aiperf_after_shell_is_killed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            marker = temp / "child-pid"
+            fake_aiperf = temp / "aiperf"
+            fake_aiperf.write_text(
+                f"""#!/usr/bin/env python3
+import os
+import pathlib
+import sys
+import time
+
+if "--version" in sys.argv:
+    print("aiperf 0.12.0")
+    raise SystemExit(0)
+pathlib.Path({str(marker)!r}).write_text(str(os.getpid()))
+time.sleep(60)
+"""
+            )
+            fake_aiperf.chmod(0o755)
+            plan = temp / "plan.csv"
+            plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
+            out_dir = temp / "output"
+            script = pathlib.Path(__file__).with_name("perf2price.sh")
+            command = [
+                "bash",
+                str(script),
+                "--url",
+                "http://localhost:8000",
+                "--model",
+                "test-model",
+                "--concurrency",
+                "1",
+                "--duration",
+                "1",
+                "--grace-period",
+                "0",
+                "--plan",
+                str(plan),
+                "--out-dir",
+                str(out_dir),
+                "--skip-probe",
+            ]
+            process = subprocess.Popen(
+                command,
+                cwd=script.parent,
+                env=self.benchmark_env(fake_aiperf),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            child_pid = None
+            try:
+                self.wait_for_path(marker, timeout=10)
+                child_pid = int(marker.read_text())
+                owner = json.loads(
+                    (out_dir / ".perf2price.lock" / "owner.json").read_text()
+                )
+                self.assertEqual(owner["active_child_pid"], child_pid)
+                os.kill(process.pid, signal.SIGKILL)
+                process.wait(timeout=10)
+
+                resumed = subprocess.run(
+                    ["bash", str(script), "--resume", str(out_dir)],
+                    cwd=script.parent,
+                    env=self.benchmark_env(fake_aiperf),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+
+                self.assertNotEqual(resumed.returncode, 0)
+                self.assertIn(
+                    f"active AIPerf PID {child_pid}",
+                    resumed.stdout + resumed.stderr,
+                )
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=10)
+                if child_pid is not None:
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_resume_preflight_failures_do_not_mutate_saved_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            fake_aiperf, _ = self.write_successful_fake_aiperf(temp)
+            plan = temp / "plan.csv"
+            plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
+            baseline = temp / "baseline"
+            initial = self.run_single_concurrency_benchmark(plan, baseline, fake_aiperf)
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            script = pathlib.Path(__file__).with_name("perf2price.sh")
+
+            mismatch_root = temp / "version-mismatch"
+            mismatch_root.mkdir()
+            mismatched_aiperf, _ = self.write_successful_fake_aiperf(
+                mismatch_root, version="aiperf 0.13.0"
+            )
+            cases = (
+                (
+                    "conflicting option",
+                    lambda _: None,
+                    ["--duration", "2"],
+                    self.benchmark_env(fake_aiperf),
+                    "--resume cannot be combined",
+                ),
+                (
+                    "missing configuration",
+                    lambda root: (root / "run_config.json").unlink(),
+                    [],
+                    self.benchmark_env(fake_aiperf),
+                    "missing saved run configuration",
+                ),
+                (
+                    "malformed configuration",
+                    lambda root: (root / "run_config.json").write_text("{"),
+                    [],
+                    self.benchmark_env(fake_aiperf),
+                    "cannot read saved run configuration",
+                ),
+                (
+                    "missing plan",
+                    lambda root: (root / "benchmark_plan.csv").unlink(),
+                    [],
+                    self.benchmark_env(fake_aiperf),
+                    "cannot read benchmark plan",
+                ),
+                (
+                    "invalid plan",
+                    lambda root: (root / "benchmark_plan.csv").write_text(
+                        "name,isl,osl,prefix_tokens\n../escape,128,16,0\n"
+                    ),
+                    [],
+                    self.benchmark_env(fake_aiperf),
+                    "invalid profile name",
+                ),
+                (
+                    "version mismatch",
+                    lambda _: None,
+                    [],
+                    self.benchmark_env(mismatched_aiperf),
+                    "AIPerf version mismatch",
+                ),
+            )
+
+            for index, (name, mutate, extra_args, env, expected) in enumerate(cases):
+                with self.subTest(name=name):
+                    run_dir = temp / f"case-{index}"
+                    shutil.copytree(baseline, run_dir)
+                    mutate(run_dir)
+                    before = self.snapshot_tree(run_dir)
+
+                    result = subprocess.run(
+                        ["bash", str(script), "--resume", str(run_dir), *extra_args],
+                        cwd=script.parent,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected, result.stdout + result.stderr)
+                    self.assertEqual(self.snapshot_tree(run_dir), before)
+
+    def test_resume_requires_current_credentials_without_exposing_them(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            fake_aiperf, _ = self.write_successful_fake_aiperf(temp)
+            plan = temp / "plan.csv"
+            plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
+            out_dir = temp / "output"
+            initial_secret = "initial-secret-value"
+            initial = self.run_single_concurrency_benchmark(
+                plan, out_dir, fake_aiperf, api_key=initial_secret
+            )
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            script = pathlib.Path(__file__).with_name("perf2price.sh")
+            before = self.snapshot_tree(out_dir)
+
+            missing = subprocess.run(
+                ["bash", str(script), "--resume", str(out_dir)],
+                cwd=script.parent,
+                env=self.benchmark_env(fake_aiperf),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("resume requires --api-key", missing.stderr)
+            self.assertEqual(self.snapshot_tree(out_dir), before)
+
+            mismatch_root = temp / "mismatch"
+            mismatch_root.mkdir()
+            mismatched_aiperf, _ = self.write_successful_fake_aiperf(
+                mismatch_root, version="aiperf 0.13.0"
+            )
+            replacement_secret = "replacement-secret-value"
+            mismatch = subprocess.run(
+                [
+                    "bash",
+                    str(script),
+                    "--resume",
+                    str(out_dir),
+                    "--api-key",
+                    replacement_secret,
+                ],
+                cwd=script.parent,
+                env=self.benchmark_env(mismatched_aiperf),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertNotEqual(mismatch.returncode, 0)
+            mismatch_output = mismatch.stdout + mismatch.stderr
+            self.assertIn("AIPerf version mismatch", mismatch_output)
+            self.assertNotIn(replacement_secret, mismatch_output)
+            self.assertEqual(self.snapshot_tree(out_dir), before)
+
+            resumed = subprocess.run(
+                [
+                    "bash",
+                    str(script),
+                    "--resume",
+                    str(out_dir),
+                    "--api-key",
+                    replacement_secret,
+                ],
+                cwd=script.parent,
+                env=self.benchmark_env(fake_aiperf),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+            self.assertNotIn(replacement_secret, resumed.stdout + resumed.stderr)
+
+    def test_legacy_resume_requires_explicit_authentication_decision(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            fake_aiperf, invocation_log = self.write_successful_fake_aiperf(temp)
+            plan = temp / "plan.csv"
+            plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
+            out_dir = temp / "output"
+            initial = self.run_single_concurrency_benchmark(plan, out_dir, fake_aiperf)
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            config_path = out_dir / "run_config.json"
+            config = json.loads(config_path.read_text())
+            config.pop("config_schema_version")
+            config.pop("api_key_required")
+            config.pop("http_connection_limit")
+            config_path.write_text(json.dumps(config))
+            context_path = out_dir / "runs" / "single" / "c1" / "run_context.json"
+            context = json.loads(context_path.read_text())
+            context["aiperf_ok"] = False
+            context["aiperf_exit_code"] = 1
+            context_path.write_text(json.dumps(context))
+            before = self.snapshot_tree(out_dir)
+            script = pathlib.Path(__file__).with_name("perf2price.sh")
+
+            missing = subprocess.run(
+                ["bash", str(script), "--resume", str(out_dir)],
+                cwd=script.parent,
+                env=self.benchmark_env(fake_aiperf),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("legacy resume requires", missing.stderr)
+            self.assertEqual(self.snapshot_tree(out_dir), before)
+
+            resumed = subprocess.run(
+                [
+                    "bash",
+                    str(script),
+                    "--resume",
+                    str(out_dir),
+                    "--no-api-key",
+                ],
+                cwd=script.parent,
+                env=self.benchmark_env(fake_aiperf),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+            self.assertEqual(
+                invocation_log.read_text().splitlines(), ["single", "single"]
+            )
+
+    def test_resume_excludes_and_preserves_unexpected_successful_points(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            fake_aiperf, _ = self.write_successful_fake_aiperf(temp)
+            plan = temp / "plan.csv"
+            plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
+            out_dir = temp / "output"
+            initial = self.run_single_concurrency_benchmark(plan, out_dir, fake_aiperf)
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            stray = out_dir / "runs" / "removed_profile" / "c1"
+            stray.mkdir(parents=True)
+            (stray / "run_context.json").write_text(
+                json.dumps(
+                    {
+                        "profile": "removed_profile",
+                        "isl": 64,
+                        "osl": 64,
+                        "prefix_tokens": 0,
+                        "concurrency": 1,
+                        "requested_duration_seconds": 1,
+                        "http_connection_limit": 65,
+                        "aiperf_exit_code": 0,
+                        "aiperf_ok": True,
+                    }
+                )
+            )
+            (stray / "profile_export_aiperf.json").write_text(
+                json.dumps(self.summary(64, 64, 1))
+            )
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(pathlib.Path(__file__).with_name("perf2price.sh")),
+                    "--resume",
+                    str(out_dir),
+                ],
+                cwd=pathlib.Path(__file__).parent,
+                env=self.benchmark_env(fake_aiperf),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            with (out_dir / "summary.csv").open(newline="") as stream:
+                profiles = [row["profile"] for row in csv.DictReader(stream)]
+            self.assertEqual(profiles, ["single"])
+            self.assertFalse(stray.exists())
+            backups = list(
+                (out_dir / "resume_backups" / "unexpected").glob("attempt-*")
+            )
+            self.assertEqual(len(backups), 1)
+            self.assertTrue((backups[0] / "c1" / "run_context.json").exists())
+
+    def test_resume_replaces_stale_aggregates_when_all_retries_fail(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            fake_aiperf, _ = self.write_successful_fake_aiperf(temp)
+            plan = temp / "plan.csv"
+            plan.write_text("name,isl,osl,prefix_tokens\nsingle,128,16,0\n")
+            out_dir = temp / "output"
+            initial = self.run_single_concurrency_benchmark(plan, out_dir, fake_aiperf)
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            context_path = out_dir / "runs" / "single" / "c1" / "run_context.json"
+            context = json.loads(context_path.read_text())
+            context["aiperf_ok"] = False
+            context["aiperf_exit_code"] = 1
+            context_path.write_text(json.dumps(context))
+            for name in (
+                "summary.csv",
+                "selected_capacity_points.csv",
+                "pricing_fit.json",
+            ):
+                (out_dir / name).write_text("stale aggregate")
+            fake_aiperf.write_text(
+                """#!/usr/bin/env python3
+import sys
+
+if "--version" in sys.argv:
+    print("aiperf 0.12.0")
+    raise SystemExit(0)
+raise SystemExit(1)
+"""
+            )
+            fake_aiperf.chmod(0o755)
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(pathlib.Path(__file__).with_name("perf2price.sh")),
+                    "--resume",
+                    str(out_dir),
+                ],
+                cwd=pathlib.Path(__file__).parent,
+                env=self.benchmark_env(fake_aiperf),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            with (out_dir / "summary.csv").open(newline="") as stream:
+                self.assertEqual(list(csv.DictReader(stream)), [])
+            with (out_dir / "selected_capacity_points.csv").open(newline="") as stream:
+                self.assertEqual(list(csv.DictReader(stream)), [])
+            pricing = json.loads((out_dir / "pricing_fit.json").read_text())
+            self.assertEqual(
+                pricing["fit_error"], "no benchmark summaries could be parsed"
+            )
+            self.assertNotIn("multipliers", pricing)
+
+    def test_resume_aggregates_complete_saved_plan_without_original_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            fake_aiperf, invocation_log = self.write_successful_fake_aiperf(temp)
+            original_plan = temp / "custom-plan.csv"
+            original_plan.write_text(
+                "name,isl,osl,prefix_tokens\nsaved_profile,128,16,0\n"
+            )
+            out_dir = temp / "output"
+            initial = self.run_single_concurrency_benchmark(
+                original_plan, out_dir, fake_aiperf
+            )
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            original_plan.unlink()
+            for name in (
+                "summary.csv",
+                "selected_capacity_points.csv",
+                "pricing_fit.json",
+            ):
+                (out_dir / name).unlink()
+            script = pathlib.Path(__file__).with_name("perf2price.sh")
+
+            resumed = subprocess.run(
+                ["bash", str(script), "--resume", str(out_dir)],
+                cwd=script.parent,
+                env=self.benchmark_env(fake_aiperf),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+            self.assertEqual(invocation_log.read_text().splitlines(), ["saved_profile"])
+            self.assertIn("Resume status: 1 complete", resumed.stdout)
+            self.assertIn("Skipping completed point", resumed.stdout)
+            for name in (
+                "summary.csv",
+                "selected_capacity_points.csv",
+                "pricing_fit.json",
+            ):
+                self.assertTrue((out_dir / name).exists(), name)
+
+    def test_resume_preserves_and_retries_failed_and_malformed_points(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = pathlib.Path(temp_dir)
+            fake_aiperf, invocation_log = self.write_successful_fake_aiperf(temp)
+            plan = temp / "plan.csv"
+            plan.write_text(
+                "name,isl,osl,prefix_tokens\nfailed,128,16,0\nmalformed,64,64,0\n"
+            )
+            out_dir = temp / "output"
+            initial = self.run_single_concurrency_benchmark(plan, out_dir, fake_aiperf)
+            self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+            failed_context_path = (
+                out_dir / "runs" / "failed" / "c1" / "run_context.json"
+            )
+            failed_context = json.loads(failed_context_path.read_text())
+            failed_context["aiperf_ok"] = False
+            failed_context["aiperf_exit_code"] = 1
+            failed_context_path.write_text(json.dumps(failed_context))
+            malformed_summary = (
+                out_dir / "runs" / "malformed" / "c1" / "profile_export_aiperf.json"
+            )
+            malformed_summary.write_text("{")
+            script = pathlib.Path(__file__).with_name("perf2price.sh")
+
+            resumed = subprocess.run(
+                ["bash", str(script), "--resume", str(out_dir)],
+                cwd=script.parent,
+                env=self.benchmark_env(fake_aiperf),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+            self.assertEqual(
+                invocation_log.read_text().splitlines(),
+                ["failed", "malformed", "failed", "malformed"],
+            )
+            self.assertIn("Resume status: 0 complete, 2 retryable", resumed.stdout)
+            self.assertIn("reason=aiperf_not_successful", resumed.stdout)
+            self.assertIn("reason=summary_missing_or_invalid", resumed.stdout)
+            for profile in ("failed", "malformed"):
+                backups = list(
+                    (out_dir / "resume_backups" / profile / "c1").glob("attempt-*")
+                )
+                self.assertEqual(len(backups), 1, profile)
+                summary = (
+                    out_dir / "runs" / profile / "c1" / "profile_export_aiperf.json"
+                )
+                self.assertIsInstance(json.loads(summary.read_text()), dict)
 
     def test_malformed_primary_summary_is_skipped(self):
         with tempfile.TemporaryDirectory() as temp_dir:
