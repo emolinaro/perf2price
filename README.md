@@ -772,6 +772,26 @@ Before starting the benchmark matrix, the harness probes the models endpoint and
 
 A failed AIPerf concurrency point is recorded and skipped; the remaining summaries are still parsed and fitted.
 
+## Resume an interrupted run
+
+Resume from the existing artifact directory:
+
+```bash
+./perf2price.sh --resume perf2price-run-20260815-120000
+```
+
+The saved `run_config.json` and `benchmark_plan.csv` are authoritative. Resume restores the endpoint, model, tokenizer, benchmark matrix, duration, SLOs, and other run settings. It rejects new benchmark options and refuses to continue when the recorded AIPerf version differs from the installed version.
+
+A point is skipped only when its saved context matches the plan and concurrency, AIPerf exited successfully, and its summary JSON is readable. Interrupted, failed, malformed, or metadata-mismatched points are moved under `resume_backups/` before being retried. Points that never started run normally. Aggregate CSV and JSON outputs are regenerated even when every benchmark point is already complete.
+
+API keys are not stored in the run directory. For an authenticated run, provide a current key when resuming:
+
+```bash
+OPENAI_API_KEY=... ./perf2price.sh --resume perf2price-run-20260815-120000
+```
+
+You can also use `--api-key KEY`. Only one process can use a run directory at a time; an interrupted local lock is preserved and recovered automatically on the next resume.
+
 ---
 
 # 9. Default benchmark plan
@@ -827,10 +847,16 @@ perf2price-run-YYYYMMDD-HHMMSS/
 │   ├── decode_2k/
 │   ├── mixed_8k/
 │   └── cache_8k/
+├── resume_backups/              # present only after retry or stale-lock recovery
+│   └── <profile>/
+│       └── c<concurrency>/
+│           └── attempt-<timestamp>-<pid>-<reason>/
 ├── summary.csv
 ├── selected_capacity_points.csv
 └── pricing_fit.json
 ```
+
+`run_config.json` and `benchmark_plan.csv` contain the immutable inputs used by `--resume`. Each completed point under `runs/` contains `run_context.json` plus the AIPerf summary artifacts. `resume_backups/` keeps prior attempts for diagnosis instead of overwriting them.
 
 ## `summary.csv`
 
