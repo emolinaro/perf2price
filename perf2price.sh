@@ -47,6 +47,7 @@ APPLY_CHAT_TEMPLATE=0
 ENDPOINT="/v1/chat/completions"
 MODELS_ENDPOINT="/v1/models"
 API_KEY="${OPENAI_API_KEY:-}"
+USE_PRIMARY_API_KEY=1
 
 CONCURRENCY_LIST="4,8,16,32,64"
 DURATION="120"
@@ -71,11 +72,16 @@ SKIP_PROBE=0
 
 EXTRA_AIPERF_ARGS=()
 LOCK_HELD=0
+RESUME_DIR=""
+RESUME_MODE=0
+RESUME_STREAM=""
+INITIAL_OPTIONS_SEEN=()
 
 usage() {
 	cat <<'EOF'
 Usage:
   perf2price.sh --url URL --model MODEL [options]
+  perf2price.sh --resume RUN_DIR [--api-key KEY]
 
 Required:
   --url URL                  OpenAI-compatible base URL, e.g. http://localhost:8000
@@ -94,6 +100,7 @@ Tokenizer (used locally by AIPerf, not by the inference server):
                              when targeting synthetic ISL. Useful for chat APIs.
 
 Benchmark:
+  --resume DIR               Resume an interrupted run from its artifact directory
   --concurrency LIST         Comma-separated concurrency sweep
                              Default: 4,8,16,32,64
   --duration SEC             Profiling duration per point
@@ -174,10 +181,26 @@ release_run_lock() {
 	fi
 }
 
-trap release_run_lock EXIT
+cleanup() {
+	release_run_lock
+	if [[ -n "$RESUME_STREAM" && -e "$RESUME_STREAM" ]]; then
+		rm -f -- "$RESUME_STREAM"
+	fi
+}
+
+trap cleanup EXIT
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--resume | --api-key | --api-key=* | -h | --help | --) ;;
+	*) INITIAL_OPTIONS_SEEN+=("$1") ;;
+	esac
+	case "$1" in
+	--resume)
+		[[ -z "$RESUME_DIR" ]] || die "--resume may only be specified once"
+		RESUME_DIR="${2:?missing value for --resume}"
+		shift 2
+		;;
 	--url)
 		URL="${2:?missing value for --url}"
 		shift 2
@@ -288,20 +311,107 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-[[ -n "$URL" ]] || die "--url is required"
-[[ -n "$MODEL" ]] || die "--model is required"
+if [[ -n "$RESUME_DIR" ]]; then
+	RESUME_MODE=1
+	OUT_DIR="$RESUME_DIR"
+	if [[ ${#INITIAL_OPTIONS_SEEN[@]} -gt 0 ]]; then
+		die "--resume cannot be combined with: ${INITIAL_OPTIONS_SEEN[*]}"
+	fi
+	if [[ ${#EXTRA_AIPERF_ARGS[@]} -gt 0 ]]; then
+		die "--resume restores saved AIPerf arguments; new arguments after -- are not allowed"
+	fi
+else
+	[[ -n "$URL" ]] || die "--url is required"
+	[[ -n "$MODEL" ]] || die "--model is required"
+fi
+
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "Python not found: $PYTHON_BIN"
+[[ -f "$FIT_PY" ]] || die "fit module not found: $FIT_PY"
+[[ -f "$RUN_PY" ]] || die "run-state module not found: $RUN_PY"
+
+SAVED_AIPERF_VERSION=""
+SAVED_API_KEY_REQUIRED=""
+if [[ "$RESUME_MODE" -eq 1 ]]; then
+	RESUME_STREAM="$(mktemp "${TMPDIR:-/tmp}/perf2price-resume.XXXXXX")"
+	if ! "$PYTHON_BIN" "$RUN_PY" emit-config "$OUT_DIR" >"$RESUME_STREAM"; then
+		die "cannot restore saved run configuration from $OUT_DIR"
+	fi
+	while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+		case "$key" in
+		url) URL="$value" ;;
+		endpoint) ENDPOINT="$value" ;;
+		models_endpoint) MODELS_ENDPOINT="$value" ;;
+		model) MODEL="$value" ;;
+		tokenizer) TOKENIZER="$value" ;;
+		tokenizer_revision) TOKENIZER_REVISION="$value" ;;
+		concurrency_list) CONCURRENCY_LIST="$value" ;;
+		duration_seconds) DURATION="$value" ;;
+		grace_period) GRACE_PERIOD="$value" ;;
+		ttft_p99_ms) TTFT_P99_MS="$value" ;;
+		itl_p99_ms) ITL_P99_MS="$value" ;;
+		resource_hour_cost_usd) RESOURCE_HOUR_COST="$value" ;;
+		random_seed) RANDOM_SEED="$value" ;;
+		num_dataset_entries) NUM_DATASET_ENTRIES="$value" ;;
+		tokenizer_trust_remote_code) TOKENIZER_TRUST_REMOTE_CODE="$value" ;;
+		apply_chat_template) APPLY_CHAT_TEMPLATE="$value" ;;
+		legacy_max_tokens) LEGACY_MAX_TOKENS="$value" ;;
+		run_cache_tests) RUN_CACHE_TESTS="$value" ;;
+		skip_probe) SKIP_PROBE="$value" ;;
+		max_context) MAX_CONTEXT="$value" ;;
+		aiperf_version) SAVED_AIPERF_VERSION="$value" ;;
+		api_key_required) SAVED_API_KEY_REQUIRED="$value" ;;
+		extra_aiperf_arg) EXTRA_AIPERF_ARGS+=("$value") ;;
+		*) die "unexpected saved configuration field: $key" ;;
+		esac
+	done <"$RESUME_STREAM"
+	rm -f -- "$RESUME_STREAM"
+	RESUME_STREAM=""
+
+	SAVED_EXTRA_API_KEY=0
+	for ((i = 0; i < ${#EXTRA_AIPERF_ARGS[@]}; i++)); do
+		arg="${EXTRA_AIPERF_ARGS[$i]}"
+		if [[ "$arg" == "--api-key" ]]; then
+			((i + 1 < ${#EXTRA_AIPERF_ARGS[@]})) || \
+				die "saved AIPerf arguments end with --api-key and cannot be resumed"
+			[[ -n "$API_KEY" ]] || \
+				die "resume requires --api-key or OPENAI_API_KEY to restore saved AIPerf credentials"
+			EXTRA_AIPERF_ARGS[i + 1]="$API_KEY"
+			SAVED_EXTRA_API_KEY=1
+			i=$((i + 1))
+		elif [[ "$arg" == --api-key=* ]]; then
+			[[ -n "$API_KEY" ]] || \
+				die "resume requires --api-key or OPENAI_API_KEY to restore saved AIPerf credentials"
+			EXTRA_AIPERF_ARGS[i]="--api-key=$API_KEY"
+			SAVED_EXTRA_API_KEY=1
+		fi
+	done
+	if [[ "$SAVED_API_KEY_REQUIRED" == "1" && -z "$API_KEY" ]]; then
+		die "resume requires --api-key or OPENAI_API_KEY for this authenticated run"
+	fi
+	if [[ "$SAVED_EXTRA_API_KEY" -eq 1 && "$SAVED_API_KEY_REQUIRED" != "1" ]]; then
+		USE_PRIMARY_API_KEY=0
+	fi
+fi
 
 URL="${URL%/}"
 TOKENIZER="${TOKENIZER:-$MODEL}"
 
 command -v "$AIPERF_BIN" >/dev/null 2>&1 || die "AIPerf not found: $AIPERF_BIN"
-command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "Python not found: $PYTHON_BIN"
-[[ -f "$FIT_PY" ]] || die "fit module not found: $FIT_PY"
-[[ -f "$RUN_PY" ]] || die "run-state module not found: $RUN_PY"
-
 AIPERF_VERSION="$("$AIPERF_BIN" --version 2>/dev/null | head -n 1 || true)"
+if [[
+	"$RESUME_MODE" -eq 1 &&
+	-n "$SAVED_AIPERF_VERSION" &&
+	"$AIPERF_VERSION" != "$SAVED_AIPERF_VERSION"
+]]; then
+	die "AIPerf version mismatch: saved '$SAVED_AIPERF_VERSION', current '$AIPERF_VERSION'"
+fi
 
-mkdir -p "$OUT_DIR"
+if [[ "$RESUME_MODE" -eq 0 ]]; then
+	mkdir -p "$OUT_DIR"
+else
+	DEFAULT_PLAN="${OUT_DIR}/benchmark_plan.csv"
+	"$PYTHON_BIN" "$RUN_PY" validate-plan "$DEFAULT_PLAN"
+fi
 "$PYTHON_BIN" "$RUN_PY" acquire-lock "$OUT_DIR" "$$"
 LOCK_HELD=1
 
@@ -336,10 +446,11 @@ PY
 # isl means the unique synthetic input portion.
 # For cache rows, total intended prompt size is roughly prefix_tokens + isl.
 DEFAULT_PLAN="${OUT_DIR}/benchmark_plan.csv"
-if [[ -n "$PLAN_FILE" ]]; then
-	cp "$PLAN_FILE" "$DEFAULT_PLAN"
-else
-	cat >"$DEFAULT_PLAN" <<'EOF'
+if [[ "$RESUME_MODE" -eq 0 ]]; then
+	if [[ -n "$PLAN_FILE" ]]; then
+		cp "$PLAN_FILE" "$DEFAULT_PLAN"
+	else
+		cat >"$DEFAULT_PLAN" <<'EOF'
 name,isl,osl,prefix_tokens
 prefill_1k,1024,64,0
 prefill_4k,4096,64,0
@@ -351,8 +462,9 @@ mixed_8k,8192,1024,0
 cache_4k,512,256,4096
 cache_8k,512,256,8192
 EOF
+	fi
+	"$PYTHON_BIN" "$RUN_PY" validate-plan "$DEFAULT_PLAN"
 fi
-"$PYTHON_BIN" "$RUN_PY" validate-plan "$DEFAULT_PLAN"
 
 # Validate concurrency list and compute max.
 MAX_CONCURRENCY="$(
@@ -375,9 +487,10 @@ export AIPERF_HTTP_CONNECTION_LIMIT="${AIPERF_HTTP_CONNECTION_LIMIT:-$((MAX_CONC
 
 # Write run_config.json via Python so values are properly JSON-escaped
 # (MODEL/URL may contain characters that would corrupt a raw heredoc).
-EXTRA_JSON='[]'
-if [[ ${#EXTRA_AIPERF_ARGS[@]} -gt 0 ]]; then
-	EXTRA_JSON="$("$PYTHON_BIN" -c '
+if [[ "$RESUME_MODE" -eq 0 ]]; then
+	EXTRA_JSON='[]'
+	if [[ ${#EXTRA_AIPERF_ARGS[@]} -gt 0 ]]; then
+		EXTRA_JSON="$("$PYTHON_BIN" -c '
 import json
 import sys
 
@@ -396,21 +509,22 @@ for arg in sys.argv[1:]:
         redacted.append(arg)
 print(json.dumps(redacted))
 ' "${EXTRA_AIPERF_ARGS[@]}")"
-fi
+	fi
 
-API_KEY_REQUIRED=0
-if [[ -n "$API_KEY" ]]; then
-	API_KEY_REQUIRED=1
-fi
+	API_KEY_REQUIRED=0
+	if [[ -n "$API_KEY" ]]; then
+		API_KEY_REQUIRED=1
+	fi
 
-"$PYTHON_BIN" "$RUN_PY" write-config "${OUT_DIR}/run_config.json" \
-	"$URL" "$ENDPOINT" "$MODELS_ENDPOINT" "$MODEL" "$TOKENIZER" \
-	"$TOKENIZER_REVISION" "$CONCURRENCY_LIST" "$DURATION" "$GRACE_PERIOD" \
-	"$TTFT_P99_MS" "$ITL_P99_MS" "${RESOURCE_HOUR_COST:-}" \
-	"$RANDOM_SEED" "$NUM_DATASET_ENTRIES" \
-	"$TOKENIZER_TRUST_REMOTE_CODE" "$APPLY_CHAT_TEMPLATE" \
-	"$LEGACY_MAX_TOKENS" "$RUN_CACHE_TESTS" "$SKIP_PROBE" "$MAX_CONTEXT" \
-	"${PLAN_FILE:-}" "${AIPERF_VERSION:-}" "$API_KEY_REQUIRED" "$EXTRA_JSON"
+	"$PYTHON_BIN" "$RUN_PY" write-config "${OUT_DIR}/run_config.json" \
+		"$URL" "$ENDPOINT" "$MODELS_ENDPOINT" "$MODEL" "$TOKENIZER" \
+		"$TOKENIZER_REVISION" "$CONCURRENCY_LIST" "$DURATION" "$GRACE_PERIOD" \
+		"$TTFT_P99_MS" "$ITL_P99_MS" "${RESOURCE_HOUR_COST:-}" \
+		"$RANDOM_SEED" "$NUM_DATASET_ENTRIES" \
+		"$TOKENIZER_TRUST_REMOTE_CODE" "$APPLY_CHAT_TEMPLATE" \
+		"$LEGACY_MAX_TOKENS" "$RUN_CACHE_TESTS" "$SKIP_PROBE" "$MAX_CONTEXT" \
+		"${PLAN_FILE:-}" "${AIPERF_VERSION:-}" "$API_KEY_REQUIRED" "$EXTRA_JSON"
+fi
 
 probe_endpoint() {
 	echo "Probing OpenAI-compatible endpoint: ${URL}${ENDPOINT}"
@@ -567,6 +681,48 @@ for c in "${CONCURRENCIES_RAW[@]}"; do
 	fi
 done
 
+POINT_STATE=""
+POINT_REASON=""
+classify_point() {
+	local name="$1"
+	local isl="$2"
+	local osl="$3"
+	local prefix="$4"
+	local concurrency="$5"
+	local result
+	result="$("$PYTHON_BIN" "$RUN_PY" classify-point \
+		"$OUT_DIR" "$name" "$isl" "$osl" "$prefix" "$concurrency" "$DURATION")"
+	IFS=$'\t' read -r POINT_STATE POINT_REASON <<<"$result"
+	case "$POINT_STATE" in
+	complete | retryable | not_started) ;;
+	*) die "invalid point state returned for profile=$name concurrency=$concurrency: $POINT_STATE" ;;
+	esac
+}
+
+if [[ "$RESUME_MODE" -eq 1 ]]; then
+	RESUME_COMPLETE=0
+	RESUME_RETRYABLE=0
+	RESUME_NOT_STARTED=0
+	while IFS=',' read -r name isl osl prefix || [[ -n "$name" ]]; do
+		name="${name//[[:space:]]/}"
+		isl="${isl//[[:space:]]/}"
+		osl="${osl//[[:space:]]/}"
+		prefix="${prefix//[[:space:]]/}"
+		[[ "$name" == "name" || -z "$name" || "${name:0:1}" == "#" ]] && continue
+		((prefix > 0 && RUN_CACHE_TESTS == 0)) && continue
+		((MAX_CONTEXT > 0 && isl + prefix + osl > MAX_CONTEXT)) && continue
+		for concurrency in "${CONCURRENCIES[@]}"; do
+			classify_point "$name" "$isl" "$osl" "$prefix" "$concurrency"
+			case "$POINT_STATE" in
+			complete) RESUME_COMPLETE=$((RESUME_COMPLETE + 1)) ;;
+			retryable) RESUME_RETRYABLE=$((RESUME_RETRYABLE + 1)) ;;
+			not_started) RESUME_NOT_STARTED=$((RESUME_NOT_STARTED + 1)) ;;
+			esac
+		done
+	done <"$DEFAULT_PLAN"
+	echo "Resume status: $RESUME_COMPLETE complete, $RESUME_RETRYABLE retryable, $RESUME_NOT_STARTED not started"
+fi
+
 run_one() {
 	local name="$1"
 	local isl="$2"
@@ -622,7 +778,7 @@ run_one() {
 		cmd+=(--apply-chat-template)
 	fi
 
-	if [[ -n "$API_KEY" ]]; then
+	if [[ "$USE_PRIMARY_API_KEY" -eq 1 && -n "$API_KEY" ]]; then
 		cmd+=(--api-key "$API_KEY")
 	fi
 
@@ -712,6 +868,24 @@ while IFS=',' read -r name isl osl prefix || [[ -n "$name" ]]; do
 	fi
 
 	for concurrency in "${CONCURRENCIES[@]}"; do
+		if [[ "$RESUME_MODE" -eq 1 ]]; then
+			classify_point "$name" "$isl" "$osl" "$prefix" "$concurrency"
+			case "$POINT_STATE" in
+			complete)
+				echo "Skipping completed point: profile=$name concurrency=$concurrency"
+				continue
+				;;
+			retryable)
+				backup="$("$PYTHON_BIN" "$RUN_PY" archive-point \
+					"$OUT_DIR" "$name" "$concurrency" "$POINT_REASON")"
+				echo "Retrying point: profile=$name concurrency=$concurrency reason=$POINT_REASON"
+				if [[ -n "$backup" ]]; then
+					echo "Preserved prior attempt: $backup"
+				fi
+				;;
+			not_started) ;;
+			esac
+		fi
 		run_one "$name" "$isl" "$osl" "$prefix" "$concurrency"
 	done
 done <"$DEFAULT_PLAN"
