@@ -42,7 +42,16 @@ class PointStatus:
     reason: str
 
 
+@dataclass(frozen=True)
+class ExpectedPoint:
+    row: PlanRow
+    concurrency: int
+    duration: float
+    http_connection_limit: int
+
+
 PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
+CONFIG_SCHEMA_VERSION = 2
 
 STRING_FIELDS = (
     "url",
@@ -85,6 +94,7 @@ REQUIRED_CONFIG_FIELDS = (
     "extra_aiperf_args",
 )
 EMITTED_FIELDS = (
+    "config_schema_version",
     "url",
     "endpoint",
     "models_endpoint",
@@ -107,6 +117,7 @@ EMITTED_FIELDS = (
     "max_context",
     "aiperf_version",
     "api_key_required",
+    "http_connection_limit",
 )
 
 
@@ -129,59 +140,96 @@ def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def parse_concurrencies(value: str) -> list[int]:
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    if not items:
+        raise RunStateError("saved concurrency list is empty")
+    values = []
+    for item in items:
+        if not re.fullmatch(r"[0-9]+", item) or int(item) <= 0:
+            raise RunStateError(f"invalid saved concurrency: {item!r}")
+        values.append(int(item))
+    return values
+
+
 def _validated_config(config) -> dict:
     if not isinstance(config, dict):
         raise RunStateError("run_config.json must contain a JSON object")
 
-    missing = sorted(set(REQUIRED_CONFIG_FIELDS) - set(config))
+    normalized = dict(config)
+    normalized.setdefault("config_schema_version", 0)
+    if not _is_int(normalized["config_schema_version"]):
+        raise RunStateError(
+            "run_config.json field 'config_schema_version' must be an integer"
+        )
+    if normalized["config_schema_version"] not in {0, 1, CONFIG_SCHEMA_VERSION}:
+        raise RunStateError(
+            "unsupported run configuration schema version: "
+            f"{normalized['config_schema_version']}"
+        )
+
+    missing = sorted(set(REQUIRED_CONFIG_FIELDS) - set(normalized))
+    if (
+        normalized["config_schema_version"] >= 1
+        and "api_key_required" not in normalized
+    ):
+        missing.append("api_key_required")
+    if (
+        normalized["config_schema_version"] >= CONFIG_SCHEMA_VERSION
+        and "http_connection_limit" not in normalized
+    ):
+        missing.append("http_connection_limit")
     if missing:
         raise RunStateError(
             "run_config.json is missing required field(s): " + ", ".join(missing)
         )
 
     for field in STRING_FIELDS:
-        value = config[field]
+        value = normalized[field]
         if not isinstance(value, str) or not value:
             raise RunStateError(f"run_config.json field {field!r} must be a string")
     for field in OPTIONAL_STRING_FIELDS:
-        value = config[field]
+        value = normalized[field]
         if value is not None and not isinstance(value, str):
             raise RunStateError(
                 f"run_config.json field {field!r} must be a string or null"
             )
     for field in BOOL_FIELDS:
-        if not isinstance(config[field], bool):
+        if not isinstance(normalized[field], bool):
             raise RunStateError(f"run_config.json field {field!r} must be Boolean")
     for field in NUMBER_FIELDS:
-        if not _is_number(config[field]):
+        if not _is_number(normalized[field]):
             raise RunStateError(f"run_config.json field {field!r} must be numeric")
     for field in INT_FIELDS:
-        if not _is_int(config[field]):
+        if not _is_int(normalized[field]):
             raise RunStateError(f"run_config.json field {field!r} must be an integer")
 
-    if config["duration_seconds"] <= 0:
+    if normalized["duration_seconds"] <= 0:
         raise RunStateError("run_config.json field 'duration_seconds' must be > 0")
-    if config["ttft_p99_ms"] < 0 or config["itl_p99_ms"] < 0:
+    if normalized["ttft_p99_ms"] < 0 or normalized["itl_p99_ms"] < 0:
         raise RunStateError("saved SLO values must be >= 0")
-    if config["max_context"] < 0 or config["random_seed"] < 0:
+    if normalized["max_context"] < 0 or normalized["random_seed"] < 0:
         raise RunStateError("saved max context and random seed must be >= 0")
-    if config["num_dataset_entries"] <= 0:
+    if normalized["num_dataset_entries"] <= 0:
         raise RunStateError("saved dataset entry count must be > 0")
     try:
-        if config["grace_period"] != "inf" and float(config["grace_period"]) < 0:
+        if (
+            normalized["grace_period"] != "inf"
+            and float(normalized["grace_period"]) < 0
+        ):
             raise ValueError
     except ValueError as exc:
         raise RunStateError(
             "run_config.json field 'grace_period' must be >= 0 or 'inf'"
         ) from exc
 
-    hour_cost = config["resource_hour_cost_usd"]
+    hour_cost = normalized["resource_hour_cost_usd"]
     if hour_cost is not None and (not _is_number(hour_cost) or hour_cost <= 0):
         raise RunStateError(
             "run_config.json field 'resource_hour_cost_usd' must be positive or null"
         )
 
-    extra_args = config["extra_aiperf_args"]
+    extra_args = normalized["extra_aiperf_args"]
     if not isinstance(extra_args, list) or not all(
         isinstance(arg, str) for arg in extra_args
     ):
@@ -189,22 +237,21 @@ def _validated_config(config) -> dict:
             "run_config.json field 'extra_aiperf_args' must be a string list"
         )
 
-    normalized = dict(config)
-    normalized.setdefault("config_schema_version", 0)
     normalized.setdefault("api_key_required", None)
-    if not _is_int(normalized["config_schema_version"]):
-        raise RunStateError(
-            "run_config.json field 'config_schema_version' must be an integer"
-        )
-    if normalized["config_schema_version"] not in {0, 1}:
-        raise RunStateError(
-            "unsupported run configuration schema version: "
-            f"{normalized['config_schema_version']}"
-        )
     api_key_required = normalized["api_key_required"]
     if api_key_required is not None and not isinstance(api_key_required, bool):
         raise RunStateError(
             "run_config.json field 'api_key_required' must be Boolean or null"
+        )
+    concurrencies = parse_concurrencies(normalized["concurrency_list"])
+    if normalized["config_schema_version"] < CONFIG_SCHEMA_VERSION:
+        normalized["http_connection_limit"] = max(concurrencies) + 64
+    if (
+        not _is_int(normalized["http_connection_limit"])
+        or normalized["http_connection_limit"] <= 0
+    ):
+        raise RunStateError(
+            "run_config.json field 'http_connection_limit' must be a positive integer"
         )
     return normalized
 
@@ -258,6 +305,31 @@ def load_plan(path: pathlib.Path) -> list[PlanRow]:
     return rows
 
 
+def expected_points(root: pathlib.Path) -> list[ExpectedPoint]:
+    root = pathlib.Path(root)
+    config = load_run_config(root)
+    rows = load_plan(root / "benchmark_plan.csv")
+    points = []
+    for row in rows:
+        if row.prefix_tokens > 0 and not config["run_cache_tests"]:
+            continue
+        if (
+            config["max_context"] > 0
+            and row.isl + row.prefix_tokens + row.osl > config["max_context"]
+        ):
+            continue
+        for concurrency in parse_concurrencies(config["concurrency_list"]):
+            points.append(
+                ExpectedPoint(
+                    row,
+                    concurrency,
+                    float(config["duration_seconds"]),
+                    config["http_connection_limit"],
+                )
+            )
+    return points
+
+
 def atomic_write_json(path: pathlib.Path, payload: dict) -> None:
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,6 +356,7 @@ def write_run_context(
     row: PlanRow,
     concurrency: int,
     duration: float,
+    http_connection_limit: int,
 ) -> None:
     validate_profile_name(row.name)
     if concurrency <= 0:
@@ -292,6 +365,8 @@ def write_run_context(
         raise RunStateError("requested duration must be positive")
     if min(row.isl, row.osl, row.prefix_tokens) < 0:
         raise RunStateError("plan token counts must be non-negative")
+    if not _is_int(http_connection_limit) or http_connection_limit <= 0:
+        raise RunStateError("HTTP connection limit must be a positive integer")
     atomic_write_json(
         path,
         {
@@ -301,6 +376,7 @@ def write_run_context(
             "prefix_tokens": row.prefix_tokens,
             "concurrency": concurrency,
             "requested_duration_seconds": duration,
+            "http_connection_limit": http_connection_limit,
         },
     )
 
@@ -327,11 +403,12 @@ def classify_point(
     row: PlanRow,
     concurrency: int,
     duration: float,
+    http_connection_limit: int,
 ) -> PointStatus:
     point = pathlib.Path(root) / "runs" / row.name / f"c{concurrency}"
     if not os.path.lexists(point):
         return PointStatus("not_started", "directory_missing")
-    if not point.is_dir():
+    if point.is_symlink() or not point.is_dir():
         return PointStatus("retryable", "directory_invalid")
     context_path = point / "run_context.json"
     if not context_path.exists():
@@ -347,6 +424,7 @@ def classify_point(
         "osl": row.osl,
         "prefix_tokens": row.prefix_tokens,
         "concurrency": concurrency,
+        "http_connection_limit": http_connection_limit,
     }
     for field, value in expected.items():
         saved = context.get(field)
@@ -424,6 +502,89 @@ def archive_point(
     return target
 
 
+def _archive_unexpected_entry(
+    root: pathlib.Path,
+    source: pathlib.Path,
+    label: str,
+    *,
+    now_ns: int,
+    pid: int,
+) -> pathlib.Path:
+    safe_label = re.sub(r"[^A-Za-z0-9._-]", "_", label).strip("_")
+    safe_label = safe_label or "entry"
+    target = root / "resume_backups" / "unexpected" / (
+        f"attempt-{now_ns}-{pid}-{safe_label}"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target = _unique_destination(target)
+    try:
+        os.replace(source, target)
+    except OSError as exc:
+        raise RunStateError(
+            f"cannot preserve unexpected run entry {source} at {target}: {exc}"
+        ) from exc
+    return target
+
+
+def archive_unexpected_points(
+    root: pathlib.Path,
+    *,
+    now_ns: int | None = None,
+    pid: int | None = None,
+) -> list[pathlib.Path]:
+    root = pathlib.Path(root)
+    runs = root / "runs"
+    if not os.path.lexists(runs):
+        return []
+    stamp = time.time_ns() if now_ns is None else now_ns
+    owner = os.getpid() if pid is None else pid
+    points = expected_points(root)
+    expected = {}
+    for point in points:
+        expected.setdefault(point.row.name, set()).add(f"c{point.concurrency}")
+    if runs.is_symlink() or not runs.is_dir():
+        return [
+            _archive_unexpected_entry(
+                root, runs, "runs", now_ns=stamp, pid=owner
+            )
+        ]
+
+    archived = []
+    for profile_entry in sorted(runs.iterdir(), key=lambda path: path.name):
+        expected_children = expected.get(profile_entry.name)
+        if (
+            expected_children is None
+            or profile_entry.is_symlink()
+            or not profile_entry.is_dir()
+        ):
+            archived.append(
+                _archive_unexpected_entry(
+                    root,
+                    profile_entry,
+                    profile_entry.name,
+                    now_ns=stamp,
+                    pid=owner,
+                )
+            )
+            continue
+        for child in sorted(profile_entry.iterdir(), key=lambda path: path.name):
+            if (
+                child.name not in expected_children
+                or child.is_symlink()
+                or not child.is_dir()
+            ):
+                archived.append(
+                    _archive_unexpected_entry(
+                        root,
+                        child,
+                        f"{profile_entry.name}-{child.name}",
+                        now_ns=stamp,
+                        pid=owner,
+                    )
+                )
+    return archived
+
+
 def process_is_alive(pid: int) -> bool:
     if not _is_int(pid) or pid <= 0:
         return False
@@ -448,6 +609,11 @@ def _lock_owner(lock: pathlib.Path) -> dict | None:
     if not isinstance(owner.get("hostname"), str) or not owner["hostname"]:
         return None
     if not isinstance(owner.get("acquired_at"), str):
+        return None
+    active_child_pid = owner.get("active_child_pid")
+    if active_child_pid is not None and (
+        not _is_int(active_child_pid) or active_child_pid <= 0
+    ):
         return None
     return owner
 
@@ -520,9 +686,15 @@ def acquire_lock(
                     f"run is locked by PID {existing['pid']} on host "
                     f"{existing['hostname']}"
                 )
+            active_child_pid = existing.get("active_child_pid")
             if is_alive(existing["pid"]):
                 raise RunStateError(
                     f"run is locked by live PID {existing['pid']} on host {host}"
+                )
+            if active_child_pid is not None and is_alive(active_child_pid):
+                raise RunStateError(
+                    f"run is locked by active AIPerf PID {active_child_pid} on host "
+                    f"{host}"
                 )
             stale_owner = existing["pid"]
         else:
@@ -546,11 +718,47 @@ def acquire_lock(
     raise RunStateError(f"could not acquire run lock after repeated races: {lock}")
 
 
+def register_lock_child(
+    root: pathlib.Path,
+    owner_pid: int,
+    child_pid: int,
+    *,
+    hostname: str | None = None,
+) -> None:
+    if not _is_int(child_pid) or child_pid <= 0:
+        raise RunStateError("lock child PID must be a positive integer")
+    root = pathlib.Path(root)
+    lock = root / ".perf2price.lock"
+    host = hostname or socket.gethostname()
+    owner = _lock_owner(lock)
+    if owner is None:
+        raise RunStateError(f"cannot register child on malformed run lock: {lock}")
+    if owner["pid"] != owner_pid or owner["hostname"] != host:
+        raise RunStateError(
+            f"run lock is owned by PID {owner['pid']} on host {owner['hostname']}"
+        )
+    owner["active_child_pid"] = child_pid
+    atomic_write_json(lock / "owner.json", owner)
+
+
+def run_locked(root: pathlib.Path, owner_pid: int, command: list[str]) -> None:
+    if not command:
+        raise RunStateError("locked command must not be empty")
+    register_lock_child(root, owner_pid, os.getpid())
+    try:
+        os.execvp(command[0], command)
+    except OSError as exc:
+        raise RunStateError(
+            f"cannot execute AIPerf command {command[0]!r}: {exc}"
+        ) from exc
+
+
 def release_lock(
     root: pathlib.Path,
     owner_pid: int,
     *,
     hostname: str | None = None,
+    is_alive: Callable[[int], bool] = process_is_alive,
 ) -> None:
     root = pathlib.Path(root)
     lock = root / ".perf2price.lock"
@@ -563,6 +771,11 @@ def release_lock(
     if owner["pid"] != owner_pid or owner["hostname"] != host:
         raise RunStateError(
             f"run lock is owned by PID {owner['pid']} on host {owner['hostname']}"
+        )
+    active_child_pid = owner.get("active_child_pid")
+    if active_child_pid is not None and is_alive(active_child_pid):
+        raise RunStateError(
+            f"run lock still protects active AIPerf PID {active_child_pid}"
         )
     try:
         (lock / "owner.json").unlink()
@@ -610,13 +823,30 @@ def _emit_config(root: pathlib.Path) -> None:
         output.write(b"extra_aiperf_arg\0" + arg.encode() + b"\0")
 
 
+def _emit_points(root: pathlib.Path) -> None:
+    for point in expected_points(root):
+        print(
+            "\t".join(
+                (
+                    point.row.name,
+                    str(point.row.isl),
+                    str(point.row.osl),
+                    str(point.row.prefix_tokens),
+                    str(point.concurrency),
+                    str(point.duration),
+                    str(point.http_connection_limit),
+                )
+            )
+        )
+
+
 def _write_config_from_args(values) -> None:
     try:
         extra_args = json.loads(values.extra_args_json)
     except json.JSONDecodeError as exc:
         raise RunStateError(f"extra AIPerf arguments are not valid JSON: {exc}") from exc
     config = {
-        "config_schema_version": 1,
+        "config_schema_version": CONFIG_SCHEMA_VERSION,
         "url": values.url,
         "endpoint": values.endpoint,
         "models_endpoint": values.models_endpoint,
@@ -644,6 +874,9 @@ def _write_config_from_args(values) -> None:
         "plan_file": values.plan_file or None,
         "aiperf_version": values.aiperf_version or None,
         "api_key_required": _flag(values.api_key_required, "api_key_required"),
+        "http_connection_limit": _integer(
+            values.http_connection_limit, "HTTP connection limit"
+        ),
         "extra_aiperf_args": extra_args,
     }
     write_run_config(pathlib.Path(values.path), config)
@@ -656,6 +889,9 @@ def _parser() -> argparse.ArgumentParser:
     emit = commands.add_parser("emit-config")
     emit.add_argument("root")
 
+    emit_points = commands.add_parser("emit-points")
+    emit_points.add_argument("root")
+
     validate = commands.add_parser("validate-plan")
     validate.add_argument("path")
 
@@ -667,6 +903,7 @@ def _parser() -> argparse.ArgumentParser:
     classify.add_argument("prefix", type=int)
     classify.add_argument("concurrency", type=int)
     classify.add_argument("duration", type=float)
+    classify.add_argument("http_connection_limit", type=int)
 
     write_context = commands.add_parser("write-context")
     write_context.add_argument("path")
@@ -676,6 +913,7 @@ def _parser() -> argparse.ArgumentParser:
     write_context.add_argument("prefix", type=int)
     write_context.add_argument("concurrency", type=int)
     write_context.add_argument("duration", type=float)
+    write_context.add_argument("http_connection_limit", type=int)
 
     finish_context = commands.add_parser("finish-context")
     finish_context.add_argument("path")
@@ -687,6 +925,9 @@ def _parser() -> argparse.ArgumentParser:
     archive.add_argument("concurrency", type=int)
     archive.add_argument("reason")
 
+    archive_unexpected = commands.add_parser("archive-unexpected")
+    archive_unexpected.add_argument("root")
+
     acquire = commands.add_parser("acquire-lock")
     acquire.add_argument("root")
     acquire.add_argument("owner_pid", type=int)
@@ -694,6 +935,11 @@ def _parser() -> argparse.ArgumentParser:
     release = commands.add_parser("release-lock")
     release.add_argument("root")
     release.add_argument("owner_pid", type=int)
+
+    locked = commands.add_parser("run-locked")
+    locked.add_argument("root")
+    locked.add_argument("owner_pid", type=int)
+    locked.add_argument("command_args", nargs=argparse.REMAINDER)
 
     write_config = commands.add_parser("write-config")
     config_args = (
@@ -721,6 +967,7 @@ def _parser() -> argparse.ArgumentParser:
         "plan_file",
         "aiperf_version",
         "api_key_required",
+        "http_connection_limit",
         "extra_args_json",
     )
     for name in config_args:
@@ -733,18 +980,28 @@ def main(argv=None) -> int:
     try:
         if values.command == "emit-config":
             _emit_config(pathlib.Path(values.root))
+        elif values.command == "emit-points":
+            _emit_points(pathlib.Path(values.root))
         elif values.command == "validate-plan":
             load_plan(pathlib.Path(values.path))
         elif values.command == "classify-point":
             row = PlanRow(values.name, values.isl, values.osl, values.prefix)
             status = classify_point(
-                pathlib.Path(values.root), row, values.concurrency, values.duration
+                pathlib.Path(values.root),
+                row,
+                values.concurrency,
+                values.duration,
+                values.http_connection_limit,
             )
             print(f"{status.state}\t{status.reason}")
         elif values.command == "write-context":
             row = PlanRow(values.name, values.isl, values.osl, values.prefix)
             write_run_context(
-                pathlib.Path(values.path), row, values.concurrency, values.duration
+                pathlib.Path(values.path),
+                row,
+                values.concurrency,
+                values.duration,
+                values.http_connection_limit,
             )
         elif values.command == "finish-context":
             finish_run_context(pathlib.Path(values.path), values.exit_code)
@@ -756,10 +1013,18 @@ def main(argv=None) -> int:
                 values.reason,
             )
             print(backup or "")
+        elif values.command == "archive-unexpected":
+            for backup in archive_unexpected_points(pathlib.Path(values.root)):
+                print(backup)
         elif values.command == "acquire-lock":
             acquire_lock(pathlib.Path(values.root), values.owner_pid)
         elif values.command == "release-lock":
             release_lock(pathlib.Path(values.root), values.owner_pid)
+        elif values.command == "run-locked":
+            command = values.command_args
+            if command[:1] == ["--"]:
+                command = command[1:]
+            run_locked(pathlib.Path(values.root), values.owner_pid, command)
         elif values.command == "write-config":
             _write_config_from_args(values)
         else:

@@ -780,7 +780,7 @@ Resume from the existing artifact directory:
 ./perf2price.sh --resume perf2price-run-20260815-120000
 ```
 
-The saved `run_config.json` and `benchmark_plan.csv` are authoritative. Resume restores the endpoint, model, tokenizer, benchmark matrix, duration, SLOs, and other run settings. It rejects new benchmark options and refuses to continue when the recorded AIPerf version differs from the installed version.
+The saved `run_config.json` and `benchmark_plan.csv` are authoritative. Resume restores the endpoint, model, tokenizer, benchmark matrix, duration, AIPerf HTTP connection limit, SLOs, and other run settings. It rejects new benchmark options and refuses to continue when the recorded AIPerf version differs from the installed version.
 
 A point is skipped only when its saved context matches the plan and concurrency, AIPerf exited successfully, and its summary JSON is readable. Interrupted, failed, malformed, or metadata-mismatched points are moved under `resume_backups/` before being retried. Points that never started run normally. Aggregate CSV and JSON outputs are regenerated even when every benchmark point is already complete.
 
@@ -790,7 +790,7 @@ API keys are not stored in the run directory. For an authenticated run, provide 
 OPENAI_API_KEY=... ./perf2price.sh --resume perf2price-run-20260815-120000
 ```
 
-You can also use `--api-key KEY`. Only one process can use a run directory at a time; an interrupted local lock is preserved and recovered automatically on the next resume.
+You can also use `--api-key KEY`. Legacy run configurations that did not record whether authentication was used require either a current key or an explicit `--no-api-key` decision. Only one process can use a run directory at a time; the lock continues protecting a live AIPerf child if its parent shell exits, and an interrupted local lock is preserved and recovered automatically once both processes stop.
 
 ---
 
@@ -848,9 +848,11 @@ perf2price-run-YYYYMMDD-HHMMSS/
 │   ├── mixed_8k/
 │   └── cache_8k/
 ├── resume_backups/              # present only after retry or stale-lock recovery
-│   └── <profile>/
-│       └── c<concurrency>/
-│           └── attempt-<timestamp>-<pid>-<reason>/
+│   ├── <profile>/
+│   │   └── c<concurrency>/
+│   │       └── attempt-<timestamp>-<pid>-<reason>/
+│   ├── unexpected/              # points outside the authoritative matrix
+│   └── locks/                   # stale lock records
 ├── summary.csv
 ├── selected_capacity_points.csv
 └── pricing_fit.json

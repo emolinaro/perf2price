@@ -16,8 +16,11 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import pathlib
+import re
 import sys
+import tempfile
 from collections import defaultdict
 
 PLATEAU_REL = 0.05
@@ -210,10 +213,38 @@ def effective_resource_seconds(requested, measured):
 
 
 def write_csv(path, records, columns):
-    with path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(records)
+    path = pathlib.Path(path)
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = pathlib.Path(raw_tmp)
+    try:
+        with os.fdopen(fd, "w", newline="") as stream:
+            writer = csv.DictWriter(
+                stream, fieldnames=columns, extrasaction="ignore"
+            )
+            writer.writeheader()
+            writer.writerows(records)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def write_json(path, payload):
+    path = pathlib.Path(path)
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = pathlib.Path(raw_tmp)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(payload, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def meets_slo(r, ttft_limit, itl_limit):
@@ -228,10 +259,118 @@ def meets_slo(r, ttft_limit, itl_limit):
     return True
 
 
-def parse_rows(root):
+def _point_context_paths(root, point_manifest):
+    if point_manifest is None:
+        return [
+            (path, None)
+            for path in sorted(root.glob("runs/*/c*/run_context.json"))
+        ]
+    paths = []
+    with pathlib.Path(point_manifest).open(newline="") as stream:
+        for line_number, values in enumerate(csv.reader(stream, delimiter="\t"), 1):
+            if len(values) != 7:
+                raise ValueError(
+                    f"point manifest line {line_number} must contain exactly 7 fields"
+                )
+            profile, isl, osl, prefix, concurrency, duration, connection_limit = values
+            if profile in {".", ".."} or not re.fullmatch(
+                r"[A-Za-z0-9._-]+", profile
+            ):
+                raise ValueError(
+                    f"point manifest line {line_number} has invalid profile"
+                )
+            if not all(re.fullmatch(r"[0-9]+", value) for value in values[1:5]):
+                raise ValueError(
+                    f"point manifest line {line_number} has invalid numeric fields"
+                )
+            try:
+                parsed_duration = float(duration)
+                parsed_connection_limit = int(connection_limit)
+            except ValueError as exc:
+                raise ValueError(
+                    f"point manifest line {line_number} has invalid run settings"
+                ) from exc
+            if (
+                not math.isfinite(parsed_duration)
+                or parsed_duration <= 0
+                or parsed_connection_limit <= 0
+                or str(parsed_connection_limit) != connection_limit
+            ):
+                raise ValueError(
+                    f"point manifest line {line_number} has invalid run settings"
+                )
+            paths.append(
+                (
+                    root
+                    / "runs"
+                    / profile
+                    / f"c{int(concurrency)}"
+                    / "run_context.json",
+                    {
+                        "profile": profile,
+                        "isl": int(isl),
+                        "osl": int(osl),
+                        "prefix_tokens": int(prefix),
+                        "concurrency": int(concurrency),
+                        "requested_duration_seconds": parsed_duration,
+                        "http_connection_limit": parsed_connection_limit,
+                    },
+                )
+            )
+    return paths
+
+
+def _context_matches_expected(ctx, expected):
+    if expected is None:
+        return True
+    for field in (
+        "isl",
+        "osl",
+        "prefix_tokens",
+        "concurrency",
+        "http_connection_limit",
+    ):
+        value = ctx.get(field)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return False
+        if value != expected[field]:
+            return False
+    if ctx.get("profile") != expected["profile"]:
+        return False
+    duration = ctx.get("requested_duration_seconds")
+    return (
+        not isinstance(duration, bool)
+        and isinstance(duration, (int, float))
+        and math.isfinite(duration)
+        and math.isclose(
+            float(duration),
+            expected["requested_duration_seconds"],
+            rel_tol=0,
+            abs_tol=1e-9,
+        )
+    )
+
+
+def parse_rows(root, point_manifest=None):
     rows = []
-    for ctx_path in sorted(root.glob("runs/*/c*/run_context.json")):
-        ctx = json.loads(ctx_path.read_text())
+    for ctx_path, expected in _point_context_paths(root, point_manifest):
+        try:
+            ctx = json.loads(ctx_path.read_text())
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            print(
+                f"WARNING: cannot read run context {ctx_path}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        if not isinstance(ctx, dict):
+            print(f"WARNING: run context is not an object: {ctx_path}", file=sys.stderr)
+            continue
+        if not _context_matches_expected(ctx, expected):
+            print(
+                f"WARNING: run context does not match authoritative point: {ctx_path}",
+                file=sys.stderr,
+            )
+            continue
         summary_path, data = load_summary(ctx_path.parent)
         if data is None:
             print(
@@ -530,11 +669,9 @@ def main(argv):
     ttft_limit = float(argv[2])
     itl_limit = float(argv[3])
     hour_cost = float(argv[4]) if argv[4] else None
+    point_manifest = pathlib.Path(argv[5]) if len(argv) > 5 else None
 
-    rows = parse_rows(root)
-    if not rows:
-        raise SystemExit("No benchmark summaries could be parsed.")
-
+    rows = parse_rows(root, point_manifest)
     write_csv(root / "summary.csv", rows, SUMMARY_COLUMNS)
 
     selected = select_capacity_points(rows, ttft_limit, itl_limit)
@@ -592,11 +729,17 @@ def main(argv):
         ],
     }
 
+    if not rows:
+        fit_result["fit_error"] = "no benchmark summaries could be parsed"
+        write_json(root / "pricing_fit.json", fit_result)
+        _print_report(root, fit_result)
+        return 0
+
     try:
         import numpy as np
     except Exception as exc:
         fit_result["fit_error"] = f"numpy unavailable: {exc}"
-        (root / "pricing_fit.json").write_text(json.dumps(fit_result, indent=2) + "\n")
+        write_json(root / "pricing_fit.json", fit_result)
         _print_report(root, fit_result)
         return 0
 
@@ -613,7 +756,7 @@ def main(argv):
             f"not enough selected workload points: {len(fit_rows)} eligible rows for "
             f"{len(names)} coefficients"
         )
-        (root / "pricing_fit.json").write_text(json.dumps(fit_result, indent=2) + "\n")
+        write_json(root / "pricing_fit.json", fit_result)
         _print_report(root, fit_result)
         return 0
 
@@ -632,7 +775,7 @@ def main(argv):
     fitted = nnls_enumerate(X, y)
     if fitted is None:
         fit_result["fit_error"] = "no stable non-negative coefficient solution found"
-        (root / "pricing_fit.json").write_text(json.dumps(fit_result, indent=2) + "\n")
+        write_json(root / "pricing_fit.json", fit_result)
         _print_report(root, fit_result)
         return 0
 
@@ -654,7 +797,7 @@ def main(argv):
             "fitted noncached-input coefficient is zero; workload matrix "
             "does not identify an input baseline well enough"
         )
-        (root / "pricing_fit.json").write_text(json.dumps(fit_result, indent=2) + "\n")
+        write_json(root / "pricing_fit.json", fit_result)
         _print_report(root, fit_result)
         return 0
     if b <= ZERO_COEF_EPS:
@@ -662,7 +805,7 @@ def main(argv):
             "fitted output coefficient is zero; workload matrix does not "
             "identify output cost well enough"
         )
-        (root / "pricing_fit.json").write_text(json.dumps(fit_result, indent=2) + "\n")
+        write_json(root / "pricing_fit.json", fit_result)
         _print_report(root, fit_result)
         return 0
 
@@ -771,7 +914,7 @@ def main(argv):
             )
         )
 
-    (root / "pricing_fit.json").write_text(json.dumps(fit_result, indent=2) + "\n")
+    write_json(root / "pricing_fit.json", fit_result)
     _print_report(root, fit_result)
     return 0
 

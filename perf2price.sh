@@ -71,17 +71,20 @@ LEGACY_MAX_TOKENS=0
 SKIP_PROBE=0
 
 EXTRA_AIPERF_ARGS=()
+HTTP_CONNECTION_LIMIT=""
 LOCK_HELD=0
 RESUME_DIR=""
 RESUME_MODE=0
+RESUME_NO_API_KEY=0
 RESUME_STREAM=""
+POINTS_STREAM=""
 INITIAL_OPTIONS_SEEN=()
 
 usage() {
 	cat <<'EOF'
 Usage:
   perf2price.sh --url URL --model MODEL [options]
-  perf2price.sh --resume RUN_DIR [--api-key KEY]
+  perf2price.sh --resume RUN_DIR [--api-key KEY | --no-api-key]
 
 Required:
   --url URL                  OpenAI-compatible base URL, e.g. http://localhost:8000
@@ -117,6 +120,7 @@ OpenAI API:
   --endpoint PATH            Default: /v1/chat/completions
   --models-endpoint PATH     Default: /v1/models
   --api-key KEY              Bearer token; defaults to OPENAI_API_KEY
+  --no-api-key               Confirm that a legacy saved run needs no credentials
   --legacy-max-tokens        Ask AIPerf to use max_tokens instead of
                              max_completion_tokens
   --skip-probe               Skip the API capability probe. The harness still
@@ -186,13 +190,16 @@ cleanup() {
 	if [[ -n "$RESUME_STREAM" && -e "$RESUME_STREAM" ]]; then
 		rm -f -- "$RESUME_STREAM"
 	fi
+	if [[ -n "$POINTS_STREAM" && -e "$POINTS_STREAM" ]]; then
+		rm -f -- "$POINTS_STREAM"
+	fi
 }
 
 trap cleanup EXIT
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--resume | --api-key | --api-key=* | -h | --help | --) ;;
+	--resume | --api-key | --api-key=* | --no-api-key | -h | --help | --) ;;
 	*) INITIAL_OPTIONS_SEEN+=("$1") ;;
 	esac
 	case "$1" in
@@ -240,6 +247,10 @@ while [[ $# -gt 0 ]]; do
 	--api-key=*)
 		API_KEY="${1#--api-key=}"
 		[[ -n "$API_KEY" ]] || die "missing value for --api-key"
+		shift
+		;;
+	--no-api-key)
+		RESUME_NO_API_KEY=1
 		shift
 		;;
 	--concurrency)
@@ -321,6 +332,7 @@ if [[ -n "$RESUME_DIR" ]]; then
 		die "--resume restores saved AIPerf arguments; new arguments after -- are not allowed"
 	fi
 else
+	[[ "$RESUME_NO_API_KEY" -eq 0 ]] || die "--no-api-key requires --resume"
 	[[ -n "$URL" ]] || die "--url is required"
 	[[ -n "$MODEL" ]] || die "--model is required"
 fi
@@ -338,6 +350,7 @@ if [[ "$RESUME_MODE" -eq 1 ]]; then
 	fi
 	while IFS= read -r -d '' key && IFS= read -r -d '' value; do
 		case "$key" in
+		config_schema_version) ;;
 		url) URL="$value" ;;
 		endpoint) ENDPOINT="$value" ;;
 		models_endpoint) MODELS_ENDPOINT="$value" ;;
@@ -360,12 +373,16 @@ if [[ "$RESUME_MODE" -eq 1 ]]; then
 		max_context) MAX_CONTEXT="$value" ;;
 		aiperf_version) SAVED_AIPERF_VERSION="$value" ;;
 		api_key_required) SAVED_API_KEY_REQUIRED="$value" ;;
+		http_connection_limit) HTTP_CONNECTION_LIMIT="$value" ;;
 		extra_aiperf_arg) EXTRA_AIPERF_ARGS+=("$value") ;;
 		*) die "unexpected saved configuration field: $key" ;;
 		esac
 	done <"$RESUME_STREAM"
 	rm -f -- "$RESUME_STREAM"
 	RESUME_STREAM=""
+	if [[ "$RESUME_NO_API_KEY" -eq 1 && -n "$API_KEY" ]]; then
+		die "--no-api-key conflicts with --api-key or OPENAI_API_KEY"
+	fi
 
 	SAVED_EXTRA_API_KEY=0
 	for ((i = 0; i < ${#EXTRA_AIPERF_ARGS[@]}; i++)); do
@@ -387,6 +404,12 @@ if [[ "$RESUME_MODE" -eq 1 ]]; then
 	done
 	if [[ "$SAVED_API_KEY_REQUIRED" == "1" && -z "$API_KEY" ]]; then
 		die "resume requires --api-key or OPENAI_API_KEY for this authenticated run"
+	fi
+	if [[ "$SAVED_API_KEY_REQUIRED" == "1" && "$RESUME_NO_API_KEY" -eq 1 ]]; then
+		die "--no-api-key cannot resume a saved authenticated run"
+	fi
+	if [[ -z "$SAVED_API_KEY_REQUIRED" && -z "$API_KEY" && "$RESUME_NO_API_KEY" -eq 0 ]]; then
+		die "legacy resume requires --api-key, OPENAI_API_KEY, or --no-api-key"
 	fi
 	if [[ "$SAVED_EXTRA_API_KEY" -eq 1 && "$SAVED_API_KEY_REQUIRED" != "1" ]]; then
 		USE_PRIMARY_API_KEY=0
@@ -483,7 +506,14 @@ print(max(vals))
 PY
 )"
 
-export AIPERF_HTTP_CONNECTION_LIMIT="${AIPERF_HTTP_CONNECTION_LIMIT:-$((MAX_CONCURRENCY + 64))}"
+if [[ "$RESUME_MODE" -eq 0 ]]; then
+	HTTP_CONNECTION_LIMIT="${AIPERF_HTTP_CONNECTION_LIMIT:-$((MAX_CONCURRENCY + 64))}"
+fi
+[[ "$HTTP_CONNECTION_LIMIT" =~ ^[0-9]+$ ]] || \
+	die "saved AIPerf HTTP connection limit must be a positive integer"
+((10#$HTTP_CONNECTION_LIMIT > 0)) || \
+	die "saved AIPerf HTTP connection limit must be a positive integer"
+export AIPERF_HTTP_CONNECTION_LIMIT="$HTTP_CONNECTION_LIMIT"
 
 # Write run_config.json via Python so values are properly JSON-escaped
 # (MODEL/URL may contain characters that would corrupt a raw heredoc).
@@ -523,8 +553,12 @@ print(json.dumps(redacted))
 		"$RANDOM_SEED" "$NUM_DATASET_ENTRIES" \
 		"$TOKENIZER_TRUST_REMOTE_CODE" "$APPLY_CHAT_TEMPLATE" \
 		"$LEGACY_MAX_TOKENS" "$RUN_CACHE_TESTS" "$SKIP_PROBE" "$MAX_CONTEXT" \
-		"${PLAN_FILE:-}" "${AIPERF_VERSION:-}" "$API_KEY_REQUIRED" "$EXTRA_JSON"
+		"${PLAN_FILE:-}" "${AIPERF_VERSION:-}" "$API_KEY_REQUIRED" \
+		"$HTTP_CONNECTION_LIMIT" "$EXTRA_JSON"
 fi
+
+POINTS_STREAM="$(mktemp "${TMPDIR:-/tmp}/perf2price-points.XXXXXX")"
+"$PYTHON_BIN" "$RUN_PY" emit-points "$OUT_DIR" >"$POINTS_STREAM"
 
 probe_endpoint() {
 	echo "Probing OpenAI-compatible endpoint: ${URL}${ENDPOINT}"
@@ -670,16 +704,9 @@ if [[ "$SKIP_PROBE" -eq 0 ]]; then
 	probe_endpoint
 fi
 
-# Split and normalize the concurrency list (trims spaces, drops empty
-# entries so "4, 8,,16" does not produce garbage levels or empty dirs).
-IFS=',' read -r -a CONCURRENCIES_RAW <<<"$CONCURRENCY_LIST"
-CONCURRENCIES=()
-for c in "${CONCURRENCIES_RAW[@]}"; do
-	c="${c//[[:space:]]/}"
-	if [[ -n "$c" ]]; then
-		CONCURRENCIES+=("$c")
-	fi
-done
+if [[ "$RESUME_MODE" -eq 1 ]]; then
+	"$PYTHON_BIN" "$RUN_PY" archive-unexpected "$OUT_DIR"
+fi
 
 POINT_STATE=""
 POINT_REASON=""
@@ -691,7 +718,8 @@ classify_point() {
 	local concurrency="$5"
 	local result
 	result="$("$PYTHON_BIN" "$RUN_PY" classify-point \
-		"$OUT_DIR" "$name" "$isl" "$osl" "$prefix" "$concurrency" "$DURATION")"
+		"$OUT_DIR" "$name" "$isl" "$osl" "$prefix" "$concurrency" \
+		"$DURATION" "$HTTP_CONNECTION_LIMIT")"
 	IFS=$'\t' read -r POINT_STATE POINT_REASON <<<"$result"
 	case "$POINT_STATE" in
 	complete | retryable | not_started) ;;
@@ -703,23 +731,14 @@ if [[ "$RESUME_MODE" -eq 1 ]]; then
 	RESUME_COMPLETE=0
 	RESUME_RETRYABLE=0
 	RESUME_NOT_STARTED=0
-	while IFS=',' read -r name isl osl prefix || [[ -n "$name" ]]; do
-		name="${name//[[:space:]]/}"
-		isl="${isl//[[:space:]]/}"
-		osl="${osl//[[:space:]]/}"
-		prefix="${prefix//[[:space:]]/}"
-		[[ "$name" == "name" || -z "$name" || "${name:0:1}" == "#" ]] && continue
-		((prefix > 0 && RUN_CACHE_TESTS == 0)) && continue
-		((MAX_CONTEXT > 0 && isl + prefix + osl > MAX_CONTEXT)) && continue
-		for concurrency in "${CONCURRENCIES[@]}"; do
-			classify_point "$name" "$isl" "$osl" "$prefix" "$concurrency"
-			case "$POINT_STATE" in
-			complete) RESUME_COMPLETE=$((RESUME_COMPLETE + 1)) ;;
-			retryable) RESUME_RETRYABLE=$((RESUME_RETRYABLE + 1)) ;;
-			not_started) RESUME_NOT_STARTED=$((RESUME_NOT_STARTED + 1)) ;;
-			esac
-		done
-	done <"$DEFAULT_PLAN"
+	while IFS=$'\t' read -r name isl osl prefix concurrency _point_duration _point_limit; do
+		classify_point "$name" "$isl" "$osl" "$prefix" "$concurrency"
+		case "$POINT_STATE" in
+		complete) RESUME_COMPLETE=$((RESUME_COMPLETE + 1)) ;;
+		retryable) RESUME_RETRYABLE=$((RESUME_RETRYABLE + 1)) ;;
+		not_started) RESUME_NOT_STARTED=$((RESUME_NOT_STARTED + 1)) ;;
+		esac
+	done <"$POINTS_STREAM"
 	echo "Resume status: $RESUME_COMPLETE complete, $RESUME_RETRYABLE retryable, $RESUME_NOT_STARTED not started"
 fi
 
@@ -734,7 +753,8 @@ run_one() {
 	mkdir -p "$run_dir"
 
 	"$PYTHON_BIN" "$RUN_PY" write-context "${run_dir}/run_context.json" \
-		"$name" "$isl" "$osl" "$prefix" "$concurrency" "$DURATION"
+		"$name" "$isl" "$osl" "$prefix" "$concurrency" "$DURATION" \
+		"$HTTP_CONNECTION_LIMIT"
 
 	local warmup="$concurrency"
 	if ((warmup < 4)); then
@@ -822,7 +842,7 @@ run_one() {
 
 	local rc
 	set +e
-	"${cmd[@]}"
+	"$PYTHON_BIN" "$RUN_PY" run-locked "$OUT_DIR" "$$" -- "${cmd[@]}"
 	rc=$?
 	set -e
 
@@ -838,61 +858,32 @@ echo "Benchmark plan: $DEFAULT_PLAN"
 cat "$DEFAULT_PLAN"
 echo
 
-# The final '|| [[ -n "$name" ]]' keeps a last row without a trailing
-# newline from being silently dropped.
-while IFS=',' read -r name isl osl prefix || [[ -n "$name" ]]; do
-	# Strip whitespace first so " name, ..." or indented rows still match
-	# the header/comment guards below.
-	name="${name//[[:space:]]/}"
-	isl="${isl//[[:space:]]/}"
-	osl="${osl//[[:space:]]/}"
-	prefix="${prefix//[[:space:]]/}"
-
-	# Skip header and empty/comment lines.
-	[[ "$name" == "name" ]] && continue
-	[[ -z "$name" ]] && continue
-	[[ "${name:0:1}" == "#" ]] && continue
-
-	[[ "$isl" =~ ^[0-9]+$ ]] || die "invalid ISL for '$name': $isl"
-	[[ "$osl" =~ ^[0-9]+$ ]] || die "invalid OSL for '$name': $osl"
-	[[ "$prefix" =~ ^[0-9]+$ ]] || die "invalid prefix_tokens for '$name': $prefix"
-
-	if ((prefix > 0 && RUN_CACHE_TESTS == 0)); then
-		echo "Skipping cache profile '$name' (--no-cache-tests)"
-		continue
+while IFS=$'\t' read -r name isl osl prefix concurrency _point_duration _point_limit; do
+	if [[ "$RESUME_MODE" -eq 1 ]]; then
+		classify_point "$name" "$isl" "$osl" "$prefix" "$concurrency"
+		case "$POINT_STATE" in
+		complete)
+			echo "Skipping completed point: profile=$name concurrency=$concurrency"
+			continue
+			;;
+		retryable)
+			backup="$("$PYTHON_BIN" "$RUN_PY" archive-point \
+				"$OUT_DIR" "$name" "$concurrency" "$POINT_REASON")"
+			echo "Retrying point: profile=$name concurrency=$concurrency reason=$POINT_REASON"
+			if [[ -n "$backup" ]]; then
+				echo "Preserved prior attempt: $backup"
+			fi
+			;;
+		not_started) ;;
+		esac
 	fi
-
-	if ((MAX_CONTEXT > 0 && isl + prefix + osl > MAX_CONTEXT)); then
-		echo "Skipping '$name': intended ISL+prefix+OSL=$((isl + prefix + osl)) > max context $MAX_CONTEXT"
-		continue
-	fi
-
-	for concurrency in "${CONCURRENCIES[@]}"; do
-		if [[ "$RESUME_MODE" -eq 1 ]]; then
-			classify_point "$name" "$isl" "$osl" "$prefix" "$concurrency"
-			case "$POINT_STATE" in
-			complete)
-				echo "Skipping completed point: profile=$name concurrency=$concurrency"
-				continue
-				;;
-			retryable)
-				backup="$("$PYTHON_BIN" "$RUN_PY" archive-point \
-					"$OUT_DIR" "$name" "$concurrency" "$POINT_REASON")"
-				echo "Retrying point: profile=$name concurrency=$concurrency reason=$POINT_REASON"
-				if [[ -n "$backup" ]]; then
-					echo "Preserved prior attempt: $backup"
-				fi
-				;;
-			not_started) ;;
-			esac
-		fi
-		run_one "$name" "$isl" "$osl" "$prefix" "$concurrency"
-	done
-done <"$DEFAULT_PLAN"
+	run_one "$name" "$isl" "$osl" "$prefix" "$concurrency"
+done <"$POINTS_STREAM"
 
 # Parse results, select one capacity point per workload, and fit coefficients.
 # Failed AIPerf points are skipped; remaining summaries are still fitted.
-"$PYTHON_BIN" "$FIT_PY" "$OUT_DIR" "$TTFT_P99_MS" "$ITL_P99_MS" "${RESOURCE_HOUR_COST:-}"
+"$PYTHON_BIN" "$FIT_PY" "$OUT_DIR" "$TTFT_P99_MS" "$ITL_P99_MS" \
+	"${RESOURCE_HOUR_COST:-}" "$POINTS_STREAM"
 
 echo
 echo "Artifacts written to: $OUT_DIR"
