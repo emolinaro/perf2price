@@ -1,6 +1,9 @@
 # Benchmark run outputs
 perf2price-run-*/
 
+# Generated Pareto figures
+pareto-figures/
+
 # Local Python environment
 .venv/
 __pycache__/

@@ -32,11 +32,14 @@ If you also provide the hourly cost of the complete serving allocation, the harn
 perf2price/
 ├── README.md
 ├── requirements.txt
+├── requirements-plot.txt
 ├── perf2price.sh
 ├── perf2price_fit.py
 ├── perf2price_run.py
+├── perf2price_pareto.py
 ├── test_perf2price.py
 ├── test_perf2price_run.py
+├── test_perf2price_pareto.py
 └── examples/
     └── benchmark-plan.csv
 ```
@@ -205,15 +208,15 @@ output_tokens           = 1019
 Formally:
 
 $$
-C = cached\_tokens
+C = cached_tokens
 $$
 
 $$
-I = prompt\_tokens - cached\_tokens
+I = prompt_tokens - cached_tokens
 $$
 
 $$
-O = completion\_tokens
+O = completion_tokens
 $$
 
 If the server does not report cached tokens, the benchmark can still fit input and output coefficients, but it cannot reliably determine `c` or `cachedMultiplier`.
@@ -635,8 +638,9 @@ The benchmark is deliberately independent of that accounting policy.
 - Python 3.12 or 3.13 (tested)
 - NVIDIA AIPerf
 - NumPy
+- Matplotlib, only if you generate Pareto comparison plots
 
-The tested AIPerf and NumPy versions are pinned in `requirements.txt`.
+The tested AIPerf and NumPy versions are pinned in `requirements.txt`. Plotting depends on Matplotlib, pinned separately in `requirements-plot.txt`, so the harness can run without a plotting stack.
 
 A simple installation is:
 
@@ -644,6 +648,7 @@ A simple installation is:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install -r requirements-plot.txt   # optional; Pareto figures only
 ```
 
 Verify AIPerf:
@@ -896,6 +901,8 @@ If a selected point is at the largest tested concurrency and throughput is still
 
 Contains the fitted time coefficients (seconds per token and seconds per million tokens), normalized multipliers with bootstrap 95% confidence intervals when enough stable resamples are available, weighted serving capacity (`3600 / a / 10^6` input-equivalent MTok per hour), per-row regression equations and residuals, fit quality (relative RMSE, rate RMSE, condition number), and optional cost-units/MTok values when `--resource-hour-cost` was supplied.
 
+To overlay several of these runs on throughput–latency Pareto curves, see [§14](#14-pareto-comparison-plots).
+
 ---
 
 # 11. How to interpret fit quality
@@ -998,13 +1005,46 @@ For every model:
 3. Use the same concurrency methodology.
 4. Apply the same TTFT/ITL SLOs.
 5. Compare fitted time coefficients, weighted serving capacity, and multipliers.
-6. Optionally supply deployment cost per hour and compare cost-units/MTok.
+6. Overlay the concurrency sweeps on throughput–latency Pareto curves (`perf2price_pareto.py`).
+7. Optionally supply deployment cost per hour and compare cost-units/MTok.
 
 This produces a much more defensible comparison than copying public API pricing multipliers.
 
 ---
 
-# 14. Improvements to consider
+# 14. Pareto comparison plots
+
+`perf2price_pareto.py` overlays selected models on one throughput–latency figure per workload profile.
+
+The default figure is the serving Pareto: **output token throughput** on the x-axis, **p99 TTFT** and **p99 ITL** as stacked panels. Each marker is one tested concurrency (`c4`, `c8`, …). The legend sits below the axes. Series labels come from `run_config.json` `model`, with the Hugging Face provider prefix removed (`moonshotai/Kimi-K3` becomes `Kimi-K3`). Duplicate short names are disambiguated with the run-directory timestamp.
+
+Failed AIPerf points, rows with errored requests, invalid API usage, or missing requested metrics are omitted.
+
+```bash
+pip install -r requirements-plot.txt
+
+python perf2price_pareto.py perf2price-run-selected -o pareto-figures
+```
+
+The first argument may be a single run directory, several run directories, or a parent such as `perf2price-run-selected` that contains them. Each profile writes `pareto-<profile>.pdf` and `pareto-<profile>.png` (vector PDF plus 300 dpi PNG). Generated figures default to `pareto-figures/` and are gitignored.
+
+Useful switches:
+
+```bash
+# Single end-to-end latency panel
+python perf2price_pareto.py perf2price-run-selected \
+  --y-metric request_latency_p99_ms
+
+# Request rate instead of output-token throughput
+python perf2price_pareto.py perf2price-run-selected \
+  --x-metric request_throughput_rps
+
+python perf2price_pareto.py --help
+```
+
+---
+
+# 15. Improvements to consider
 
 The following improvements remain open.
 
@@ -1078,9 +1118,9 @@ An optional mode could additionally collect:
 
 This should remain optional so the benchmark stays backend-independent.
 
-## I. Generate comparison plots automatically
+## I. Generate additional comparison plots
 
-Useful plots include:
+Throughput–latency Pareto curves per profile are produced by `perf2price_pareto.py`. Other useful plots remain open:
 
 - throughput vs concurrency
 - TTFT vs concurrency
@@ -1096,7 +1136,7 @@ Useful plots include:
 
 ---
 
-# 15. Output derivation
+# 16. Output derivation
 
 `pricing_fit.json` keeps the time-based measurement primary and optional accounting values separate. The important fields are:
 
@@ -1161,7 +1201,7 @@ The time model remains valid independently of which currency, credit system, or 
 
 ---
 
-# 16. Summary
+# 17. Summary
 
 The complete workflow is:
 
